@@ -1,0 +1,21 @@
+{
+  "name": "anishare-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.5.44",
+    "vue-router": "^4.6.4",
+    "hlsjs": "npm:hls.js@^1.7.4",
+    "artplayer": "^5.4.0"
+  },
+  "devDependencies": {
+    "vite": "^7.3.7",
+    "@vitejs/plugin-vue": "^6.0.0"
+  }
+}

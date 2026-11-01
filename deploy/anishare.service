@@ -1,0 +1,18 @@
+[Unit]
+Description=AniShare 番剧库
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sakana
+WorkingDirectory=/home/sakana/workspace/anishare
+EnvironmentFile=/home/sakana/workspace/anishare/.env
+ExecStart=/usr/bin/env node server/src/index.js
+Restart=on-failure
+RestartSec=3
+# 转码需要读取媒体目录与访问 GPU
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target
