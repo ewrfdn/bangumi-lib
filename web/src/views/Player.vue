@@ -17,6 +17,7 @@ const info = ref(null)
 const mode = ref('direct') // direct | transcode
 const hlsReady = ref(false)
 const statusText = ref('')
+const busy = ref('') // 转码等待提示（只在卡住/换会话时出现）
 
 const art = shallowRef(null)
 const hls = shallowRef(null)
@@ -56,12 +57,31 @@ function saveProgress(key, time, duration, extra = {}) {
   } catch {}
 }
 let lastSaved = 0
-let resumeAt = 0
 
 /* ---------------- 播放器核心 ---------------- */
 
+// 调试开关：浏览器控制台执行 localStorage.setItem('anishare.debug','1') 后刷新
+const dbg = (...a) => {
+  if (localStorage?.getItem?.('anishare.debug') === '1') console.log('[pg]', ...a)
+}
+
+// 转码流状态
+let resumeAt = 0 // 本会话期望的播放起点（源文件时间轴）
+let seekTarget = 0 // 用户点/拖进度条的目标位置
+let userSeek = false // 紧随其后的 seeking 是否来自用户
+let userSeekNote = 0 // 用户操作前的播放位置
+let seekTimer = null
+let recoverTimer = null
+let watchdogTimer = null
+let recovering = false
+let hlsInfo = null // 当前会话进度 { start, frontier, ended }
+let durationTimer = null
+
 function stopHls() {
   clearTimeout(durationTimer)
+  clearTimeout(recoverTimer)
+  clearInterval(watchdogTimer)
+  clearTimeout(seekTimer)
   if (hls.value) {
     try {
       hls.value.destroy()
@@ -70,12 +90,17 @@ function stopHls() {
   }
 }
 
-function destroy() {
-  stopHls()
+/** 释放当前转码会话（真正停止 ffmpeg 进程） */
+function releaseSession() {
   if (hlsSession.value) {
     api.hlsStop(hlsSession.value.id)
     hlsSession.value = null
   }
+}
+
+function destroy() {
+  stopHls()
+  releaseSession()
   if (art.value) {
     try {
       art.value.destroy(false)
@@ -106,89 +131,243 @@ function baseOptions(extra = {}) {
   }
 }
 
-/** 转码模式：进度条时长始终以源文件为准（m3u8 只是窗口分片） */
-let durationTimer = null
+/** 进度条时长以源文件为准（m3u8 只有已转码的片段，时长不完整） */
 function fixDuration() {
   const srcDur = Number(info.value?.duration) || 0
   const a = art.value
   if (!a || !srcDur) return
-  const v = a.video
-  if (Math.abs((v.duration || 0) - srcDur) > 1) {
+  if (Math.abs((a.video.duration || 0) - srcDur) > 1) {
     try {
       a.duration = srcDur
     } catch {}
   }
-  // 有的浏览器会在之后回写 video.duration，持续校正一小段时间
   clearTimeout(durationTimer)
   durationTimer = setTimeout(fixDuration, 1200)
 }
 
-/** 当前 HLS 地址（相对 / 绝对都可） */
-function startHls(hlsUrl, artplayer) {
+/* ---------- 缓冲区工具 ---------- */
+
+function bufferedNear(v, t, avail = 0.5) {
+  for (let i = 0; i < v.buffered.length; i++) {
+    const s = v.buffered.start(i)
+    const e = v.buffered.end(i)
+    if (t >= s - 0.5 && t <= e && e - t > avail) return { start: s, end: e }
+  }
+  return null
+}
+function bufferedEnd(v) {
+  let end = 0
+  for (let i = 0; i < v.buffered.length; i++) end = Math.max(end, v.buffered.end(i))
+  return end
+}
+
+/* ---------- 用户操作识别 ---------- */
+
+/** 进度条上的鼠标/触摸操作 = 用户主动跳转，同时记下点击点对应的时间 */
+function markUserSeek(ev) {
+  const a = art.value
+  const bar = ev?.currentTarget || document.querySelector('.art-progress')
+  if (bar && a) {
+    const r = bar.getBoundingClientRect()
+    const x = ev?.clientX ?? ev?.touches?.[0]?.clientX ?? r.x + r.width / 2
+    const ratio = Math.min(1, Math.max(0, (x - r.x) / Math.max(1, r.width)))
+    const dur = Number(info.value?.duration) || a.video.duration || 0
+    if (dur > 0) seekTarget = ratio * dur
+  }
+  userSeek = true
+  userSeekNote = a ? a.video.currentTime : 0
+  clearTimeout(markUserSeek.t)
+  markUserSeek.t = setTimeout(() => (userSeek = false), 400)
+}
+
+/** 程序内部的静默跳转：不要当成用户 seek */
+function silentSeek(t) {
+  const a = art.value
+  if (!a) return
+  userSeek = false
+  clearTimeout(markUserSeek.t)
+  clearTimeout(markUserSeek.t)
+  // 用 setSeek 让 hls.js 自己的 startPosition 跟着走，避免它把播放头拉回旧位置
+  try {
+    a.setSeek(t)
+  } catch {}
+  a.video.currentTime = t
+}
+
+/* ---------- 转码流：seek / 追流 ---------- */
+
+function onSeeking() {
+  const a = art.value
+  if (!a || !userSeek) return
+  // 程序内部的静默对齐（位置与用户操作前一致）不算用户 seek
+  if (Math.abs(a.video.currentTime - userSeekNote) > Math.max(3, Math.abs(seekTarget - userSeekNote) * 0.5) === false) return
+  dbg('seeking →', a.video.currentTime, 'target', seekTarget)
+  clearTimeout(seekTimer)
+  seekTimer = setTimeout(resolveSeek, 400)
+}
+
+/**
+ * 转码流跳转：
+ *  - 目标在已转码范围内 → 直接静默跳转（等待转码追上）
+ *  - 目标超出已转码进度 → 从目标位置新开会话
+ */
+async function resolveSeek() {
+  const a = art.value
+  if (!a) return
+  const srcDur = Number(info.value?.duration) || 0
+  const want = Math.min(Math.max(0, seekTarget), srcDur || Infinity)
+  const infoNow = await refreshInfo()
+  const frontier = infoNow?.frontier || 0
+  dbg('resolveSeek want', want, 'frontier', frontier, 'buffered', bufferedEnd(a.video))
+  // 目标在已转码进度之后（或回到很早以前、会话起点之前）→ 重新开会话
+  const beforeStart = infoNow && infoNow.start > 0 && want < infoNow.start - 5
+  if (want > frontier - 2 || beforeStart) {
+    restartTranscode(Math.floor(want))
+    return
+  }
+  silentSeek(want)
+  a.video.play().catch(() => {})
+}
+
+async function refreshInfo() {
+  const s = hlsSession.value
+  if (!s) return null
+  try {
+    hlsInfo = await api.hlsInfo(s.id)
+  } catch {}
+  return hlsInfo
+}
+
+/**
+ * 播放转码流。
+ * hls.js 会把播放头静默对齐到 startPosition 对应的分片（首片缓冲后），
+ * 因此换会话时只要新建实例、把 startPosition 设为目标即可，不用自己“猜时间轴”。
+ */
+function startHls(hlsUrl, artplayer, target) {
   stopHls()
+  const video = artplayer.video
   const h = new Hls({
+    startPosition: Math.max(0, target || 0),
+    startOnSegmentBoundary: true,
+    maxBufferLength: 20,
+    maxMaxBufferLength: 30,
+    backBufferLength: 60,
     enableWorker: true,
     lowLatencyMode: false,
-    maxBufferLength: 30,
-    maxMaxBufferLength: 60,
     manifestLoadingTimeOut: 30_000,
     manifestLoadingMaxRetry: 4,
     fragLoadingTimeOut: 60_000,
     fragLoadingMaxRetry: 4,
-    // 伪直播流：从 startTime 起连续转码；hls.js 会自动从 EXT-X-START 起播
   })
   hls.value = h
-  const video = artplayer.video
+  dbg('startHls', hlsUrl, 'startPosition', target)
   h.on(Hls.Events.MANIFEST_PARSED, () => {
     hlsReady.value = true
-    statusText.value = ''
-    if (resumeAt > 1) video.currentTime = resumeAt
     video.play().catch(() => {})
-    // 转码流的 m3u8 只有窗口内分片，时长不可靠 → 用源文件时长修正进度条
     fixDuration()
     setTimeout(fixDuration, 1500)
   })
-  // 拖到尚未转码的区间：hls.js 会请求还不存在的分片，我们重新从该位置转码
+  h.on(Hls.Events.LEVEL_LOADED, () => refreshInfo())
   h.on(Hls.Events.ERROR, (_e, data) => {
-    if (data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR && data.response?.code === 404) {
-      const at = art.value?.video.currentTime || 0
-      if (at > 0.5) restartTranscode(at)
-      return
-    }
+    dbg('hls error', data.type, data.details, 'fatal', data.fatal, 'code', data.response?.code || '')
     if (!data.fatal) return
-    statusText.value = '转码流波动，正在重连…'
     if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
       h.recoverMediaError()
     } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
       setTimeout(() => h.startLoad(), 1500)
     } else {
-      // 其它错误：重新拉起转码
-      setTimeout(() => restartTranscode(video.currentTime || 0), 1500)
+      restartTranscode(video.currentTime || 0)
     }
   })
   h.attachMedia(video)
-  h.loadSource(hlsUrl)
+  h.loadSource(hlsUrl.split('?')[0])
 }
 
-/** 拖动到未转码的位置：新建一个 HLS 会话 */
+/**
+ * 换转码会话：新实例把播放头静默跳到目标位置。
+ * 目标还没转出来时（新会话刚启动），先停在该位置等首片，不自动往前跑。
+ */
 async function restartTranscode(from) {
-  if (!art.value) return
-  const current = art.value
-  const wasPlaying = !current.video.paused
-  resumeAt = Math.max(0, from)
-  hlsReady.value = false
-  statusText.value = '正在从当前位置继续转码…'
+  const a = art.value
+  if (!a || recovering) return
+  const target = Math.max(0, Math.floor(Number(from) || 0))
+  recovering = true
+  busy.value = '正在从该位置开始转码…'
+  clearTimeout(recoverTimer)
+  clearInterval(watchdogTimer)
+  dbg('restartTranscode →', target)
   try {
-    const s = await api.hlsStart(props.path, resumeAt)
-    if (hlsSession.value) api.hlsStop(hlsSession.value.id)
+    const s = await api.hlsStart(props.path, target)
+    if (art.value !== a) return
+    releaseSession()
     hlsSession.value = s
-    if (art.value !== current) return // 期间用户已切到别的集
-    startHls(s.m3u8, current)
-    if (wasPlaying) current.play()
-    fixDuration()
+    hlsInfo = { start: s.start, frontier: s.start, ended: false }
+    resumeAt = target
+    a.video.pause()
+    startHls(s.m3u8, a, target)
+    startWatchdog(target)
   } catch (e) {
     error.value = e.message
+    busy.value = ''
+  } finally {
+    recovering = false
   }
+}
+
+/**
+ * 看门狗：每秒检查一次
+ *  1. 新会话还没转出目标位置 → 停在目标位置等待（不播放）
+ *  2. 播放头越过已转码进度（缓冲播完）→ 暂停并等待转码追上
+ *  3. 长时间追不上 → 从当前位置换会话
+ *  4. 一直卡住 → 重试
+ */
+function startWatchdog(target) {
+  clearInterval(watchdogTimer)
+  let stuck = 0
+  watchdogTimer = setInterval(async () => {
+    const a = art.value
+    if (!a) return clearInterval(watchdogTimer)
+    const v = a.video
+    const t = v.currentTime
+    const frontier = hlsInfo?.frontier || 0
+    const ready = bufferedNear(v, t, 0.3)
+    // 1) 目标还没转出来
+    if (target > frontier + 1) {
+      busy.value = `正在从 ${fmtTime(target)} 开始转码…`
+      if (!v.paused && t > frontier - 3) v.pause()
+      if (Math.abs(t - target) > 2) silentSeek(Math.min(target, frontier > 0 ? Math.max(frontier - 1, 0) : 0))
+      return
+    }
+    // 2) 播放头在缓冲之外（转码还没追上）
+    if (!ready) {
+      busy.value = '正在等待转码追赶…'
+      stuck++
+      if (t < (hlsInfo?.start || 0) - 2) {
+        silentSeek(hlsInfo.start)
+        v.play().catch(() => {})
+        stuck = 0
+        return
+      }
+      if (v.paused && t <= frontier - 3) v.play().catch(() => {})
+      if (stuck > 8) {
+        // 追了 8 秒还没数据 → 直接从当前位置换会话
+        stuck = 0
+        restartTranscode(Math.floor(t))
+      }
+      return
+    }
+    // 3) 正常播放
+    stuck = 0
+    busy.value = ''
+    if (v.paused) v.play().catch(() => {})
+  }, 1000)
+}
+
+/** 记录实际播放位置（用于续播） */
+function rememberProgress() {
+  const a = art.value
+  if (!a || !info.value) return
+  saveProgress(playKey.value, a.video.currentTime, info.value.duration || 0, { title: title.value, hevc: Boolean(v.value?.hevc) })
 }
 
 function addSettings(artplayer) {
@@ -243,11 +422,23 @@ function fmtCodec() {
 }
 
 function bindEvents(artplayer) {
+  // 进度条上的鼠标/触摸操作 = 用户主动跳转（每个播放器只注册一次）
+  const bar = artplayer.controls?.progress?.$progress || artplayer.template?.$progress || document.querySelector('.art-progress')
+  if (bar) {
+    bar.addEventListener('mousedown', markUserSeek, true)
+    bar.addEventListener('click', markUserSeek, true)
+    bar.addEventListener('touchstart', markUserSeek, { capture: true, passive: true })
+  }
+  artplayer.video.addEventListener('seeking', onSeeking)
   artplayer.on('video:loadedmetadata', () => {
-    if (resumeAt > 1 && artplayer.video.currentTime < 0.5) {
+    // 直链续播（转码流由 hls.js 的 startPosition 负责）
+    if (mode.value === 'direct' && resumeAt > 1 && artplayer.video.currentTime < 0.5) {
       artplayer.video.currentTime = resumeAt
       artplayer.notice.show = `已从 ${fmtTime(resumeAt)} 继续播放`
     }
+  })
+  artplayer.on('video:playing', () => {
+    busy.value = ''
   })
   artplayer.on('video:timeupdate', () => {
     const a = art.value
@@ -292,15 +483,15 @@ async function setupTranscode(startAt) {
   statusText.value = '正在启动转码…'
   const session = await api.hlsStart(props.path, resumeAt)
   hlsSession.value = session
+  hlsInfo = { start: resumeAt, frontier: resumeAt, ended: false }
   const a = new Artplayer(
     baseOptions({
       url: session.m3u8,
       type: 'm3u8',
-      // Artplayer 内置了 hls.js 集成，这里使用项目里安装的 hls.js 实例
       customType: {
-        m3u8: (video, url, artplayer) => startHls(url, artplayer),
+        m3u8: (video, url, artplayer) => startHls(url, artplayer, resumeAt),
       },
-      // 转码流是伪直播/VOD 播放列表，用源时长做进度条
+      // 转码流用源文件时长做进度条；不接受直播模式
       duration: info.value?.duration || 0,
       live: false,
     }),
@@ -309,6 +500,7 @@ async function setupTranscode(startAt) {
   addSettings(a)
   bindEvents(a)
   loading.value = false
+  startWatchdog(resumeAt)
 }
 
 function detectType(name) {
@@ -389,9 +581,9 @@ function back() {
     <div class="player-shell">
       <div ref="playerEl" class="player-host" />
       <transition name="fade">
-        <div v-if="loading" class="loading-overlay">
+        <div v-if="loading || busy" class="loading-overlay">
           <div class="spinner" />
-          <span>{{ statusText || '加载中…' }}</span>
+          <span>{{ busy || statusText || '加载中…' }}</span>
         </div>
       </transition>
     </div>

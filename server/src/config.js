@@ -67,6 +67,10 @@ export const config = {
     maxBitrate: process.env.TRANSCODE_MAX_BITRATE || '',
     audioBitrate: process.env.TRANSCODE_AUDIO_BITRATE || '192k',
     tonemap: process.env.TRANSCODE_TONEMAP !== '0',
+    // 软件编码线程数（内存受限环境调小，默认 0 = 自动）
+    threads: Number(process.env.TRANSCODE_THREADS || 0),
+    // 编码器 lookahead，越小内存越省
+    rcLookahead: Number(process.env.TRANSCODE_RC_LOOKAHEAD || 0),
   },
   dataDir: path.join(PROJECT_ROOT, 'data'),
 }

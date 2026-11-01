@@ -17,7 +17,6 @@ import { ffmpegPath, buildTranscodeArgs } from './ffmpeg.js'
 const DIR = path.join(config.dataDir, 'hls')
 const TIMEOUT_MS = Number(process.env.HLS_IDLE_TIMEOUT_MS || 5 * 60 * 1000)
 const SEGMENT_SECONDS = Number(process.env.HLS_SEGMENT_SECONDS || 5)
-const WINDOW = 10 // 播放列表里保留多少片
 const PACKET = 188
 const START_CODE = Buffer.from([0, 0, 1])
 
@@ -51,6 +50,7 @@ class Session {
     this.sawPts = false
     this.annexB = Buffer.alloc(0)
     this.lastPts = null
+    this.basePts = null // 首个视频包的原始 PTS，用于还原 B 帧造成的 33bit 回绕
     this.videoIsH264 = undefined
   }
 
@@ -132,20 +132,18 @@ class Session {
       }
       // 第一个视频包决定本片起点（有的编码器片头 PTS 为 0，属正常）
       if (this.segStart < 0 && (buf[off + 1] & 0x40)) {
-        const pts = readPts(buf, off) ?? 0
+        const raw = readPts(buf, off) ?? 0
+        if (this.basePts === null) this.basePts = raw
+        this.segStart = normalizePts(raw, this.basePts)
         this.sawPts = true
-        this.segStart = pts
       }
       const pkt = buf.subarray(off, off + PACKET)
       // 每个视频包都记录 PTS（mpegts 每包都带 PES 头，重复的 PTS 无害）
-      const pusi = (pkt[1] & 0x40) !== 0
-      const pktPts = readPts(buf, off)
-      if (pktPts !== null) this.lastPts = pktPts
+      const rawPts = readPts(buf, off)
+      const pktPts = rawPts === null ? null : normalizePts(rawPts, this.basePts)
       // 边收边拼 Annex-B NAL，检测 IDR（NAL 可能跨 TS 包 / 每包都可能带 PES 头）
       const keyPts = feedNal(this, pkt, pktPts)
-      if (keyPts !== null && this.segBytes > 0 && this.segStart >= 0 && keyPts - this.segStart >= this.minSegment) {
-        this.cutSegment(keyPts)
-      }
+      if (keyPts !== null && this.segBytes > 0 && this.segStart >= 0) this.cutSegment(keyPts)
       this.segBuffers.push(Buffer.from(pkt))
       this.segBytes += PACKET
       off += PACKET
@@ -156,10 +154,11 @@ class Session {
   }
 
   cutSegment(nextStart) {
-    if (!this.segBuffers.length || this.segStart < 0 || nextStart - this.segStart < this.minSegment) {
-      // 关键帧距离过近（GOP 太短 / 片头）→ 不切
-      return
-    }
+    // 关键帧过近（片头残留、B 帧重排导致的伪关键帧）不切；否则每 keyint 一刀。
+    // 间隔超过 1.8 个片长时必须切，避免长片导致播放卡在片尾。
+    const sinceLast = nextStart - this.segStart
+    if (!this.segBuffers.length || this.segStart < 0) return
+    if (sinceLast < SEGMENT_SECONDS * 0.6 && sinceLast < SEGMENT_SECONDS * 1.8) return
     const name = `seg-${String(this.segments.length).padStart(5, '0')}.ts`
     const data = Buffer.concat(this.segBuffers)
     const start = this.segStart
@@ -192,29 +191,28 @@ class Session {
   }
 
   /**
-   * 生成 m3u8。
-   * mode=event：从 startTime 开始连续转码的伪直播流，hls.js 可在已生成分片间原生拖动；
-   * mode=window：按客户端位置给出窗口（备用）。
+   * 生成 m3u8（伪直播 EVENT 流）。
+   *
+   * 播放列表从本会话已生成的第一片开始（MEDIA-SEQUENCE 固定），hls.js 增量解析；
+   * 同时通过 info() 告诉前端：本会话起点、已转码到的最远位置、第一个分片起点，
+   * 前端据此决定“直接静默跳转”还是“换会话 / 等转码追上”。
    */
-  playlist(position) {
+  playlist() {
     const segs = this.segments
     if (!segs.length) return null
     // 首片太短时先等一会儿，避免整个流的时间轴起点过短
     if (!this.ended && segs.length === 1 && segs[0].duration < this.minSegment * 0.8) return null
     const finished = this.ended
-    const startIdx = 0
-    const windowSegs = segs.slice(startIdx, startIdx + 4000)
+    const windowSegs = segs.slice(0, 4000)
     const target = Math.max(SEGMENT_SECONDS, ...windowSegs.map((s) => Math.ceil(s.duration)))
-
     const lines = [
       '#EXTM3U',
       '#EXT-X-VERSION:3',
       `#EXT-X-TARGETDURATION:${target}`,
-      `#EXT-X-MEDIA-SEQUENCE:${startIdx}`,
+      '#EXT-X-MEDIA-SEQUENCE:0',
       '#EXT-X-DISCONTINUITY-SEQUENCE:0',
       '#EXT-X-INDEPENDENT-SEGMENTS',
       '#EXT-X-PLAYLIST-TYPE:EVENT',
-      `#EXT-X-START:TIME-OFFSET=${(this.startTime || 0).toFixed(3)}`,
     ]
     if (finished) lines.push('#EXT-X-ENDLIST')
     for (const s of windowSegs) {
@@ -222,6 +220,22 @@ class Session {
       lines.push(`seg/${s.name}`)
     }
     return lines.join('\n') + '\n'
+  }
+
+  /** 本会话进度：分片覆盖的全局时间轴区间（秒，源文件时间轴） */
+  info() {
+    const segs = this.segments
+    const last = segs[segs.length - 1]
+    return {
+      id: this.id,
+      start: this.startTime || 0,
+      // 分片在全局时间轴上对应 [firstStart, frontier]
+      firstStart: segs.length && this.startTime > 0 ? this.startTime : 0,
+      frontier: last ? (this.startTime || 0) + last.start + last.duration : this.startTime || 0,
+      ended: this.ended,
+      error: this.error || null,
+      encoder: this.encoder,
+    }
   }
 
   segmentFile(name) {
@@ -235,6 +249,16 @@ class Session {
       this.child?.kill('SIGKILL')
     } catch {}
   }
+}
+
+/** 时间戳归一：-ss 到 5 秒多重映射点附近时，前面的 B 帧 PTS 会变成超大值（33bit 边界），这里还原 */
+const PTS_MAX = 2 ** 33 / 90000
+function normalizePts(t, base) {
+  if (base === undefined || base === null) return t
+  let v = t
+  while (v - base > PTS_MAX / 2) v -= PTS_MAX
+  while (base - v > PTS_MAX / 2) v += PTS_MAX
+  return v
 }
 
 const PTS_WRAP = 2 ** 33 / 90000 // 33bit 90kHz ≈ 95443.7s（约 26.5 小时）回绕
@@ -294,6 +318,7 @@ function videoPayload(pkt) {
 function scanNals(buf, session) {
   const isH264 = session.isH264
   let key = false
+  let count = 0
   let i = 0
   while (true) {
     const sc = buf.indexOf(START_CODE, i)
@@ -302,7 +327,13 @@ function scanNals(buf, session) {
     if (h >= buf.length) break
     const raw = buf[h]
     // 编码格式由输出参数决定：libx264/vaapi/nvenc h264 → H.264，否则 HEVC
-    if (isH264 ? (raw & 0x1f) === 5 : (raw >> 1) >= 16 && (raw >> 1) <= 21) key = true
+    // 一次 scan 里可能扫到多个 NAL（跨包拼接），只认第一个 IDR
+    if (isH264 ? (raw & 0x1f) === 5 : (raw >> 1) >= 16 && (raw >> 1) <= 21) {
+      if (!key) {
+        key = true
+        count++
+      }
+    }
     i = h + 1
   }
   return key
@@ -337,7 +368,9 @@ export async function getOrCreateSession(absPath, startTime, info) {
     return s
   }
   s = new Session(id, absPath, info)
-  s.startTime = Math.floor(startTime)
+  // 起始位置限制在时长内（避免 -ss 超过片长导致空流）
+  const dur = Number(info?.duration) || 0
+  s.startTime = dur > 0 ? Math.max(0, Math.min(Math.floor(startTime), Math.floor(dur) - 2)) : Math.floor(startTime)
   sessions.set(id, s)
   await s.start()
   return s

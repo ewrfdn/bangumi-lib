@@ -34,6 +34,7 @@ export const api = {
   streamSubtitleUrl: (path, index) => `/api/stream-subtitle?${q({ path, index })}`,
   hlsStart: (path, t = 0) => getJSON(`/api/hls/start?${q({ path, t: Math.max(0, Math.floor(t)) })}`),
   hlsStop: (id) => fetch(`/api/hls/${id}`, { method: 'DELETE' }).catch(() => {}),
+  hlsInfo: (id) => getJSON(`/api/hls/${id}/info`),
 }
 
 export function fmtSize(bytes) {

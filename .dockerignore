@@ -1,0 +1,14 @@
+# 依赖在镜像内重新安装
+node_modules
+**/node_modules
+# 前端在镜像内重新构建
+web/dist
+# 本地下载的 ffmpeg（镜像里用 apt 安装）
+tools
+data
+.cache
+.git
+.env
+*.log
+deploy
+README.md

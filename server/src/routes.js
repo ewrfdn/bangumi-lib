@@ -280,11 +280,10 @@ export default async function registerRoutes(app) {
   app.get('/api/hls/:id/index.m3u8', async (req, reply) => {
     const s = sessionById(str(req.params.id))
     if (!s) return reply.code(404).send('# session expired')
-    const pos = Number(str(req.query.pos)) || s.startTime
     let text = null
     const t0 = Date.now()
     while (Date.now() - t0 < 45_000) {
-      text = s.playlist(pos)
+      text = s.playlist()
       if (text) break
       if (s.error) break
       await new Promise((r) => setTimeout(r, 120))
@@ -295,6 +294,14 @@ export default async function registerRoutes(app) {
     reply.header('Cache-Control', 'no-store')
     reply.header('Access-Control-Allow-Origin', '*')
     return reply.type('application/vnd.apple.mpegurl').send(text)
+  })
+
+  /** 会话进度（已转码到哪 / 是否结束） */
+  app.get('/api/hls/:id/info', async (req, reply) => {
+    const s = sessionById(str(req.params.id))
+    if (!s) return reply.code(404).send({ error: '会话不存在或已过期' })
+    reply.header('Cache-Control', 'no-store')
+    return s.info()
   })
 
   /** HLS 分片 */

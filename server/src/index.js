@@ -1,11 +1,21 @@
 import fs from 'node:fs'
 import os from 'node:os'
+import v8 from 'node:v8'
 import path from 'node:path'
 import Fastify from 'fastify'
 import fastifyStatic from '@fastify/static'
 import { config, PROJECT_ROOT } from './config.js'
 import registerRoutes from './routes.js'
 import { stopAllSessions } from './hls.js'
+
+// 内存上限（MB）：限制了 cgroup / 容器内存时，把 V8 堆压到 60%，避免 Node 与 ffmpeg 争抢导致 OOM
+const limitMb = Number(process.env.MEMORY_LIMIT_MB || 0)
+if (limitMb > 0 && !process.env.NODE_OPTIONS?.includes('--max-old-space-size')) {
+  const heap = Math.round(limitMb * 0.6)
+  try {
+    v8.setFlagsFromString(`--max-old-space-size=${heap}`)
+  } catch {}
+}
 
 const app = Fastify({
   logger: { level: process.env.LOG_LEVEL || 'info', disableRequestLogging: true },

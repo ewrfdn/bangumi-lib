@@ -359,14 +359,31 @@ export async function buildTranscodeArgs(absPath, probeInfo, { startTime = 0, se
     // 用 GPU 解码（HEVC Main10 / AV1 都支持），CPU 只负责封装
     args.push('-hwaccel', 'cuda')
   }
-  if (Number(startTime) > 0) {
-    // 关键：-ss 放在 -i 前，ffmpeg 会按索引跳到最近的关键帧，无需解码前面的内容
-    args.push('-ss', String(Math.max(0, Number(startTime))))
-  }
+  // 关键：-ss 放在 -i 之前 = 输入侧快速定位（按索引跳到最近关键帧，不解码前面的内容）。
+  // 即使从 0 开始也带上，避免走「精确 seek」路径而按 1x 实时解码。
+  args.push('-ss', String(Math.max(0, Number(startTime) || 0)))
+  args.push('-noaccurate_seek')
   args.push('-i', absPath)
 
+  // 关键帧间隔与切片长度一致，切片才能严格按 keyint 切
+  const keyint = Math.max(2, Math.round(segmentSeconds * (probeInfo?.video?.fps || 24)))
   const codecArgs = {
-    libx264: ['-preset', config.ffmpeg.preset || 'veryfast', '-profile:v', 'high', '-x264-params', 'scenecut=0:keyint=150:min-keyint=150:bframes=0', '-b:v', bitrate, '-maxrate', maxrate, '-bufsize', '4M'],
+    libx264: [
+      '-preset', config.ffmpeg.preset || 'veryfast',
+      '-profile:v', 'high',
+      '-x264-params',
+      [
+        'scenecut=0',
+        `keyint=${keyint}`,
+        `min-keyint=${keyint}`,
+        'bframes=0',
+        config.ffmpeg.rcLookahead ? `rc-lookahead=${config.ffmpeg.rcLookahead}:lookahead-threads=1` : '',
+      ]
+        .filter(Boolean)
+        .join(':'),
+      ...(config.ffmpeg.threads ? ['-threads', String(config.ffmpeg.threads)] : []),
+      '-b:v', bitrate, '-maxrate', maxrate, '-bufsize', '4M',
+    ],
     libx265: ['-preset', config.ffmpeg.preset || 'ultrafast', '-x265-params', 'log-level=error', '-b:v', bitrate],
     libsvtav1: ['-preset', '10', '-b:v', bitrate],
     h264_videotoolbox: ['-b:v', bitrate, '-allow_sw', '1', '-realtime', '1'],
@@ -400,12 +417,13 @@ export async function buildTranscodeArgs(absPath, probeInfo, { startTime = 0, se
     ...codecArgs,
     // 软件编码统一输出 8bit yuv420p；硬件编码有 cuda/vaapi 格式链，交给滤镜处理
     ...(software || nvdec ? ['-pix_fmt', 'yuv420p'] : []),
-    '-g', String(Math.max(2, Math.round(segmentSeconds * (probeInfo?.video?.fps || 24)))),
+    '-g', String(keyint),
     '-c:a', 'aac',
     '-b:a', config.ffmpeg.audioBitrate,
     '-ac', '2',
     '-af', 'aresample=async=1:first_pts=0',
-    '-max_muxing_queue_size', '4096',
+    // 调整封装队列（内存受限时可调小）
+    '-max_muxing_queue_size', String(Number(process.env.TRANSCODE_MUX_QUEUE || 4096)),
     '-f', 'mpegts',
     '-',
   ]

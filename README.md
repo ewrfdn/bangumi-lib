@@ -50,6 +50,57 @@ npm start                 # 或用 pm2 / systemd 守护
 npm run dev               # 后端 :8088，前端 http://localhost:5173
 ```
 
+## Docker 部署（推荐）
+
+镜像基于 `node:22-alpine`，内置 `ffmpeg`（含 libx264/libx265/libass），媒体目录以**挂载**方式使用。
+
+```bash
+# 1. 构建镜像
+docker compose build
+
+# 2. 启动（默认把 /home/sakana/bangumi 挂到容器 /media，端口 8088）
+docker compose up -d
+
+# 3. 查看日志 / 停止
+docker compose logs -f
+docker compose down
+```
+
+也可以直接用 docker 命令：
+
+```bash
+docker build -t anishare:latest .
+
+docker run -d --name anishare \
+  -p 8088:8088 \
+  -v /home/sakana/bangumi:/media \
+  -v anishare-data:/app/data \
+  --memory 512m --memory-swap 512m \
+  --cpus 4 \
+  anishare:latest
+```
+
+### 可调参数（`.env` 或环境变量）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `BANGUMI_DIR` | `/home/sakana/bangumi` | **宿主机上的番剧目录**（挂载到容器 `/media`；可加 `:ro` 只读） |
+| `PORT` | `8088` | 宿主机端口 |
+| `CPUS` | `4` | CPU 限额；多路转码时可调大 |
+| `HLS_SEGMENT_SECONDS` | `5` | 分片长度 |
+| `HLS_CACHE_MAX_MB` | `1024` | 分片缓存上限 |
+| `TRANSCODE_AUDIO_BITRATE` | `192k` | 转码音频码率 |
+
+要点：
+
+- **内存上限 512MB**：`mem_limit: 512m` 同时限制 Node 与 ffmpeg 子进程的总内存；`memswap_limit` 与之相等即禁用交换。
+  转码的内存占用与分辨率/并发数相关，1080p 单路软件转码约 150~250MB，**建议同时观看不超过 2 路**。
+  若出现 ffmpeg 被 OOM 杀掉，把 `mem_limit` 调到 `1g` 或降低并发。
+- **数据卷**：`anishare-data` 挂到 `/app/data`，存放转码分片缓存（容器重启会自动清空缓存，卷本身只占磁盘）。
+- **GPU 加速**：默认关闭。宿主机装了 `nvidia-container-toolkit` 且想用 NVENC 时，取消 `docker-compose.yml` 里
+  `deploy.resources.reservations.devices` 的注释；容器内会自动探测可用编码器，不可用则回退 libx264。
+- 容器内默认 `HOST=0.0.0.0`，手机 / 电视盒子用宿主机内网 IP + 端口访问即可。
+
 ## 配置（环境变量 / `.env`）
 
 | 变量 | 默认值 | 说明 |
@@ -98,6 +149,9 @@ anishare/
 ├── scripts/
 │   ├── dev.mjs             # 一键开发模式
 │   └── install-ffmpeg.mjs  # 免 root 安装 ffmpeg（Ubuntu deb 重定位）
+├── Dockerfile              # 多阶段构建（前端 → 后端 → 运行时，内置 ffmpeg）
+├── docker-compose.yml      # 挂载媒体目录、内存限制 512m
+├── deploy/anishare.service # systemd 部署示例
 └── tools/ffmpeg/           # setup:ffmpeg 的产物（不入库）
 ```
 
@@ -115,6 +169,7 @@ anishare/
 | `GET /api/hls/start?path=...&t=0` | 创建（或复用）转码会话，返回 m3u8 地址 |
 | `GET /api/hls/:id/index.m3u8` | 播放列表 |
 | `GET /api/hls/:id/seg/:name` | 分片 |
+| `GET /api/hls/:id/info` | 会话进度（已转码到哪 / 是否结束） |
 | `DELETE /api/hls/:id` | 停止转码会话 |
 
 路径参数都是相对媒体根目录的虚拟路径（`/番剧/Season 1/xxx.mkv` 的 URL 编码形式），
@@ -138,6 +193,9 @@ anishare/
 - **H.265 卡顿**：默认码率跟源文件走。可调小 `TRANSCODE_VIDEO_BITRATE=4M`；
   有可用 GPU 时确认 `/api/status` 里 `transcode` 不是 `libx264`。
 - **双击播放出现 2~3 秒黑屏**：转码首帧需要时间（`ffmpeg -ss` + 首个关键帧），属正常现象；已看过的剧集再次打开会更快（分片已缓存）。
+- **拖动进度条**：已转码过的区间立即跳转；跳到尚未转码的位置会从该点新建转码会话，
+  首次约 2~4 秒（`ffmpeg -ss` 定位 + 首片生成），期间显示“正在从 X 开始转码…”。
+- **容器里 ffmpeg 被 OOM 杀掉**：说明 512MB 上限不够当前并发，二选一：调大 `mem_limit`，或减少同时观看人数。
 - **图形字幕（sup/idx）**：无法以文本形式外挂，播放器会标注“图形字幕”。
 - **开机自启**：用 systemd 示例即可：
 
