@@ -343,6 +343,15 @@ export async function getOrCreateSession(absPath, startTime, info) {
   return s
 }
 
+/** 启动时清空上次运行残留的分片（磁盘缓存只用于单次播放进程内复用） */
+Promise.resolve()
+  .then(async () => {
+    const entries = await fsp.readdir(DIR).catch(() => [])
+    for (const e of entries) await fsp.rm(path.join(DIR, e), { recursive: true, force: true }).catch(() => {})
+    console.log(`[hls] 已清理 ${entries.length} 个上次残留的分片目录`)
+  })
+  .catch(() => {})
+
 /** 定时清理空闲会话 */
 setInterval(() => {
   const now = Date.now()
@@ -353,6 +362,37 @@ setInterval(() => {
     }
   }
 }, 30_000).unref()
+
+/** 分片目录用久了会变大：超过上限时清理最久未使用的会话目录 */
+async function pruneCache() {
+  const MAX_BYTES = Number(process.env.HLS_CACHE_MAX_MB || 4096) * 1024 * 1024
+  let total = 0
+  const dirs = []
+  try {
+    for (const name of await fsp.readdir(DIR)) {
+      if (sessions.has(name)) continue
+      const full = path.join(DIR, name)
+      let size = 0
+      for (const f of await fsp.readdir(full).catch(() => [])) {
+        size += (await fsp.stat(path.join(full, f)).catch(() => ({ size: 0 }))).size
+      }
+      const st = await fsp.stat(full).catch(() => ({ mtimeMs: 0 }))
+      dirs.push({ full, size, mtime: st.mtimeMs })
+      total += size
+    }
+  } catch {
+    return
+  }
+  if (total <= MAX_BYTES) return
+  dirs.sort((a, b) => a.mtime - b.mtime)
+  for (const d of dirs) {
+    if (total <= MAX_BYTES * 0.8) break
+    await fsp.rm(d.full, { recursive: true, force: true }).catch(() => {})
+    total -= d.size
+  }
+}
+setInterval(() => pruneCache().catch(() => {}), 5 * 60_000).unref()
+setTimeout(() => pruneCache().catch(() => {}), 10_000).unref()
 
 export function sessionById(id) {
   const s = sessions.get(id)
