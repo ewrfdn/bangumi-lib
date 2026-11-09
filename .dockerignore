@@ -3,12 +3,18 @@ node_modules
 **/node_modules
 # 前端在镜像内重新构建
 web/dist
+# 后端在 build 阶段由 tsc 生成
+server/dist
 # 本地下载的 ffmpeg（镜像里用 apt 安装）
 tools
 data
 .cache
 .git
 .env
+**/.env
+**/.env.*
+!**/.env.example
 *.log
-deploy
+deploy/*
+!deploy/nginx.conf
 README.md

@@ -1,25 +1,52 @@
+# Run with: docker compose --env-file server/.env ...
 services:
-  anishare:
+  server:
     build:
       context: .
       dockerfile: Dockerfile
-    image: anishare:latest
-    container_name: anishare
+    image: anishare-server:latest
+    container_name: anishare-server
     restart: unless-stopped
-    ports:
-      # 宿主机端口 : 容器端口
-      - "${PORT:-8088}:8088"
+    expose:
+      - "8088"
     volumes:
-      # 宿主机番剧目录 : 容器内媒体目录（可改路径或换成只读 :ro）
-      - "${BANGUMI_DIR:-/home/sakana/bangumi}:/media"
-      # 转码分片缓存（持久化，重启后可直接清理）
+      # Each library root must be mounted here and named by its own variable.
+      - "${BANGUMI_DIR:-${BANGUMI_ROOT:-/home/sakana/bangumi}}:/media"
+      # - /srv/anime:/media/anime:ro
+      # - /srv/films:/media/films:ro
+      # SQLite, encrypted model settings, and transcode cache survive restarts.
       - anishare-data:/app/data
     environment:
-      BANGUMI_ROOT: /media
+      HOST: 0.0.0.0
       PORT: 8088
+      BANGUMI_LIBRARY: /media
+      MOVIE_LIBRARY: ${MOVIE_LIBRARY:-}
+      AUTH_SECRET: ${AUTH_SECRET:-}
+      DB_PATH: /app/data/anishare.sqlite
+      SESSION_DAYS: ${SESSION_DAYS:-30}
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
+      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:-}
+      AI_ENABLED: ${AI_ENABLED:-0}
+      AI_API_FORMAT: ${AI_API_FORMAT:-openai-completions}
+      AI_BASE_URL: ${AI_BASE_URL:-}
+      AI_MODEL: ${AI_MODEL:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MAX_TOKENS: ${AI_MAX_TOKENS:-2048}
+      AI_TIMEOUT_MS: ${AI_TIMEOUT_MS:-30000}
+      AI_CONFIG_KEY: ${AI_CONFIG_KEY:-}
+      BANGUMI_CRAWLER_ENABLED: ${BANGUMI_CRAWLER_ENABLED:-1}
+      BANGUMI_CRAWLER_PROXY_URL: ${BANGUMI_CRAWLER_PROXY_URL:-}
+      BANGUMI_CRAWLER_USER_AGENT: ${BANGUMI_CRAWLER_USER_AGENT:-anishare/bangumi-lib/0.1}
+      BANGUMI_CRAWLER_TIMEOUT_MS: ${BANGUMI_CRAWLER_TIMEOUT_MS:-15000}
+      BANGUMI_CRAWLER_OPERATION_TIMEOUT_MS: ${BANGUMI_CRAWLER_OPERATION_TIMEOUT_MS:-35000}
+      BANGUMI_CRAWLER_MAX_RETRIES: ${BANGUMI_CRAWLER_MAX_RETRIES:-1}
+      BANGUMI_CRAWLER_MIN_INTERVAL_MS: ${BANGUMI_CRAWLER_MIN_INTERVAL_MS:-1000}
+      BANGUMI_CRAWLER_TOKEN: ${BANGUMI_CRAWLER_TOKEN:-}
+      DOUBAN_CRAWLER_ENABLED: ${DOUBAN_CRAWLER_ENABLED:-0}
+      DOUBAN_CRAWLER_PROXY_URL: ${DOUBAN_CRAWLER_PROXY_URL:-}
+      DOUBAN_CRAWLER_TIMEOUT_MS: ${DOUBAN_CRAWLER_TIMEOUT_MS:-20000}
       MEMORY_LIMIT_MB: 512
       NODE_OPTIONS: --max-old-space-size=280
-      # 转码参数：内存受限环境下用「省内存」档位（软编线程少、lookahead 小、封装队列小）
       TRANSCODE_THREADS: ${TRANSCODE_THREADS:-2}
       TRANSCODE_RC_LOOKAHEAD: ${TRANSCODE_RC_LOOKAHEAD:-10}
       TRANSCODE_VIDEO_PRESET: ${TRANSCODE_VIDEO_PRESET:-veryfast}
@@ -29,12 +56,10 @@ services:
       HLS_SEGMENT_SECONDS: ${HLS_SEGMENT_SECONDS:-5}
       HLS_CACHE_MAX_MB: ${HLS_CACHE_MAX_MB:-1024}
       LOG_LEVEL: ${LOG_LEVEL:-info}
-    # 内存上限 512MB（Node 堆上限同步约束在 384MB，留出 ffmpeg/原生内存）
     mem_limit: 512m
     memswap_limit: 512m
-    # 多路并发转码 + 转码本身占用较多 CPU，按需调整
     cpus: ${CPUS:-4}
-    # 有 NVIDIA GPU 且想用 NVENC 时打开（需要 nvidia-container-toolkit）
+    # NVIDIA support requires nvidia-container-toolkit.
     # deploy:
     #   resources:
     #     reservations:
@@ -43,11 +68,24 @@ services:
     #           count: all
     #           capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8088/api/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8088/api/auth/session').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    image: anishare-web:latest
+    container_name: anishare-web
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8088}:80"
+    depends_on:
+      server:
+        condition: service_healthy
 
 volumes:
   anishare-data:

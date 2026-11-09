@@ -1,8 +1,10 @@
 node_modules/
 web/dist/
+server/dist/
 data/
 .cache/
 *.log
+*.log.err
 .DS_Store
 .env
 tools/

@@ -1,0 +1,12 @@
+# 定时任务注册表。type 必须在 server/src/scheduler/registry.ts 中注册。
+# cron 为六段格式（秒 分 时 日 月 周），时区以下方 timezone 为准。
+# enabled: false 表示不自动触发，仍可用 POST /api/scheduler/tasks/:type/run 手动运行。
+timezone: Asia/Shanghai
+tasks:
+  - type: scan_library
+    cron: "0 */10 * * * *"   # 每 10 分钟扫描一次媒体库（当前仅手动触发）
+    enabled: false
+    timeoutMs: 3600000   # 首次批量分类 71 个目录可能超过 15 分钟
+    options:
+      libraryId: bangumi
+      maxDepth: 4

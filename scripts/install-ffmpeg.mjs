@@ -3,8 +3,8 @@
  * 免 root 把 ffmpeg（含 libx264 / libx265 / libdav1d / libass 等）连同依赖库
  * 安装到项目的 tools/ffmpeg/ 下。
  *
- *   npm run setup:ffmpeg
- *   MIRROR=https://archive.ubuntu.com/ubuntu npm run setup:ffmpeg     # arm64 用 ubuntu-ports
+ *   cd server && npm run setup:ffmpeg
+ *   MIRROR=https://archive.ubuntu.com/ubuntu node scripts/install-ffmpeg.mjs     # arm64 用 ubuntu-ports
  *
  * 支持的发行版：Ubuntu 22.04/24.04（jammy/noble）及其衍生版本。
  * 依赖：dpkg-deb；patchelf 不存在时会自动从镜像下载。

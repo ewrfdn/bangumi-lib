@@ -1,5 +1,11 @@
-async function getJSON(url) {
-  const res = await fetch(url, { headers: { Accept: 'application/json' } })
+async function getJSON(url, options = {}) {
+  const { body, ...rest } = options
+  const res = await fetch(url, {
+    credentials: 'same-origin',
+    ...rest,
+    headers: { Accept: 'application/json', ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  })
   const text = await res.text()
   let data = null
   try {
@@ -8,6 +14,9 @@ async function getJSON(url) {
     data = { error: text.slice(0, 200) }
   }
   if (!res.ok) {
+    if (res.status === 401 && !url.startsWith('/api/auth/')) {
+      window.dispatchEvent(new Event('anishare:unauthorized'))
+    }
     const err = new Error(data?.error || `请求失败 (${res.status})`)
     err.status = res.status
     err.data = data
@@ -23,16 +32,36 @@ const q = (obj) =>
     .join('&')
 
 export const api = {
+  authSession: () => getJSON('/api/auth/session'),
+  login: (key) => getJSON('/api/auth/login', { method: 'POST', body: { key } }),
+  logout: () => getJSON('/api/auth/logout', { method: 'POST', body: {} }),
+  progress: (library) => getJSON(`/api/progress?${q({ library })}`),
+  saveProgress: (item, { keepalive = false } = {}) => getJSON('/api/progress', { method: 'PUT', body: item, keepalive }),
+  importProgress: (items) => getJSON('/api/progress/import', { method: 'POST', body: { items } }),
+  deleteProgress: (path, library) => getJSON(`/api/progress?${q({ path, library })}`, { method: 'DELETE' }),
   status: () => getJSON('/api/status'),
-  library: () => getJSON('/api/library'),
-  list: (path) => getJSON(`/api/list?${q({ path })}`),
-  video: (path) => getJSON(`/api/video?${q({ path })}`),
+  aiConfig: () => getJSON('/api/admin/ai/config'),
+  saveAiConfig: (config) => getJSON('/api/admin/ai/config', { method: 'PUT', body: config }),
+  testAiConfig: (config) => getJSON('/api/admin/ai/test', { method: 'POST', body: config }),
+  tasks: (params = {}) => getJSON(`/api/tasks?${q(params)}`),
+  cancelTask: (id) => getJSON(`/api/tasks/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+  deleteTask: (id) => getJSON(`/api/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  schedulerTasks: () => getJSON('/api/scheduler/tasks'),
+  runSchedulerTask: (type) => getJSON(`/api/scheduler/tasks/${encodeURIComponent(type)}/run`, { method: 'POST' }),
+  reloadScheduler: () => getJSON('/api/scheduler/reload', { method: 'POST' }),
+  runAgent: (prompt) => getJSON('/api/agent/run', { method: 'POST', body: { prompt } }),
+  media: (params = {}) => getJSON(`/api/media?${q(params)}`),
+  libraries: () => getJSON('/api/libraries'),
+  library: (library) => getJSON(`/api/library?${q({ library })}`),
+  series: (path, library) => getJSON(`/api/library/series?${q({ path, library })}`),
+  list: (path, library) => getJSON(`/api/list?${q({ path, library })}`),
+  video: (path, library) => getJSON(`/api/video?${q({ path, library })}`),
 
-  streamUrl: (path) => `/api/stream?${q({ path })}`,
-  fileUrl: (path) => `/api/file?${q({ path })}`,
-  subtitleUrl: (path) => `/api/subtitle?${q({ path })}`,
-  streamSubtitleUrl: (path, index) => `/api/stream-subtitle?${q({ path, index })}`,
-  hlsStart: (path, t = 0) => getJSON(`/api/hls/start?${q({ path, t: Math.max(0, Math.floor(t)) })}`),
+  streamUrl: (path, library) => `/api/stream?${q({ path, library })}`,
+  fileUrl: (path, library) => `/api/file?${q({ path, library })}`,
+  subtitleUrl: (path, library) => `/api/subtitle?${q({ path, library })}`,
+  streamSubtitleUrl: (path, index, library) => `/api/stream-subtitle?${q({ path, index, library })}`,
+  hlsStart: (path, t = 0, library) => getJSON(`/api/hls/start?${q({ path, library, t: Math.max(0, Math.floor(t)) })}`),
   hlsStop: (id) => fetch(`/api/hls/${id}`, { method: 'DELETE' }).catch(() => {}),
   hlsInfo: (id) => getJSON(`/api/hls/${id}/info`),
 }
@@ -132,6 +161,21 @@ export function parseEpisode(name) {
   m = n.match(/[-–_ ](\d{1,3})(?:v\d)?(?=[\s.[\]]|$)/)
   if (m) return { episode: +m[1] }
   return {}
+}
+
+export const MEDIA_TYPE_LABELS = { anime: '番剧', movie: '电影' }
+export const mediaTypeLabel = (type) => MEDIA_TYPE_LABELS[type] || type || ''
+export const mediaSourceLabel = (source) =>
+  ({ bangumi: 'Bangumi', douban: '豆瓣' })[String(source || '').toLowerCase()] || source || ''
+
+/** 数据库封面：外部 URL、bangumi 本地资源或媒体库内相对路径。 */
+export function mediaCoverUrl(cover, library = '') {
+  if (!cover) return ''
+  if (/^https?:\/\//i.test(cover)) return cover
+  if (cover.startsWith('/')) return cover
+  const parts = cover.split('/').filter(Boolean).map((part) => encodeURIComponent(part))
+  if (cover.startsWith('bangumi/')) return `/assets/${parts.join('/')}`
+  return api.fileUrl(cover, library)
 }
 
 /** 稳定地从字符串生成一个主题色（用于无封面时的渐变占位） */

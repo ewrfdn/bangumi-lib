@@ -1,80 +1,41 @@
 <script setup>
-import { computed, ref } from 'vue'
-import { api, hueFrom } from '../api'
-
+import { computed, ref, watch } from 'vue'
+import { api, prettyTitle } from '../api'
 const props = defineProps({
   name: { type: String, default: '' },
+  src: { type: String, default: '' },
   poster: { type: String, default: '' },
+  library: { type: String, default: '' },
   wide: { type: Boolean, default: false },
 })
-
-const failed = ref(false)
-const imgSrc = computed(() => (props.poster && !failed.value ? api.fileUrl(props.poster) : ''))
-const hue = computed(() => hueFrom(props.name))
-const initial = computed(() => (props.name || '?').trim().slice(0, 1).toUpperCase())
-const style = computed(() => ({
-  '--h': `${hue.value}`,
-  '--h2': `${(hue.value + 48) % 360}`,
-}))
+const srcFailed = ref(false)
+const posterFailed = ref(false)
+watch(() => [props.src, props.poster, props.library], () => {
+  srcFailed.value = false
+  posterFailed.value = false
+})
+const imgSrc = computed(() => {
+  if (props.src && !srcFailed.value) return props.src
+  if (props.poster && !posterFailed.value) return api.fileUrl(props.poster, props.library)
+  return ''
+})
+const title = computed(() => prettyTitle(props.name))
+const initial = computed(() => title.value.trim().slice(0, 1) || '▶')
+function onError() {
+  if (props.src && !srcFailed.value) srcFailed.value = true
+  else posterFailed.value = true
+}
 </script>
-
 <template>
-  <div class="poster" :class="{ wide }" :style="style">
-    <img v-if="imgSrc" :src="imgSrc" :alt="name" loading="lazy" @error="failed = true" />
-    <div v-else class="placeholder">
-      <span class="initial">{{ initial }}</span>
-    </div>
-    <div class="gloss" />
-    <div class="shade" />
+  <div class="poster" :class="{ wide }">
+    <img v-if="imgSrc" :src="imgSrc" :alt="name" loading="lazy" @error="onError" />
+    <div v-else class="placeholder" aria-hidden="true"><span>{{ initial }}</span></div>
   </div>
 </template>
-
 <style scoped>
-.poster {
-  position: relative;
-  overflow: hidden;
-  border-radius: 14px;
-  aspect-ratio: 2 / 3;
-  background: hsl(var(--h) 40% 14%);
-  isolation: isolate;
-}
-.poster.wide {
-  aspect-ratio: 16 / 9;
-}
-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-.placeholder {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  background:
-    radial-gradient(120% 90% at 20% 10%, hsl(var(--h) 70% 28% / 0.9), transparent 60%),
-    radial-gradient(120% 100% at 90% 100%, hsl(var(--h2) 75% 26% / 0.85), transparent 55%),
-    linear-gradient(160deg, hsl(var(--h) 30% 12%), hsl(var(--h2) 30% 8%));
-}
-.initial {
-  font-size: clamp(36px, 6vw, 64px);
-  font-weight: 800;
-  color: rgba(255, 255, 255, 0.86);
-  text-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
-  letter-spacing: 2px;
-}
-.gloss {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.14), transparent 38%);
-  pointer-events: none;
-}
-.shade {
-  position: absolute;
-  inset: auto 0 0 0;
-  height: 55%;
-  background: linear-gradient(to top, rgba(0, 0, 0, 0.35), transparent);
-  pointer-events: none;
-}
+.poster { position: relative; overflow: hidden; border-radius: 5px; aspect-ratio: 2 / 3; background: #16131f; }
+.poster.wide { aspect-ratio: 16 / 9; }
+img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.placeholder { position: absolute; inset: 0; display: grid; place-items: center; border: 1px solid #a78bfa12; border-radius: inherit; background: linear-gradient(145deg, #201a30, #111016); }
+.placeholder span { font-size: clamp(28px, 3vw, 48px); color: #a78bfa65; font-weight: 500; }
 </style>

@@ -1,36 +1,21 @@
-# AniShare 镜像：多阶段构建（前端 → 后端依赖 → 运行时）
-# ffmpeg 用系统包（含 libx264 / libx265 / libass / libdav1d），负责转码、媒体探测、字幕抽取
-
-############################
-# 1. 构建前端
-############################
-FROM node:22-alpine AS web
-WORKDIR /app
-COPY package.json package-lock.json ./
-COPY web/package.json web/package.json
-RUN npm ci --no-audit --no-fund --workspace=anishare-web --include-workspace-root
-COPY web ./web
-RUN npm run build -w web
-
-############################
-# 2. 安装后端依赖（仅生产依赖）
-############################
+# Backend API image. The web application is built and served independently.
 FROM node:22-alpine AS deps
-WORKDIR /app
-COPY package.json package-lock.json ./
-COPY web/package.json web/package.json
-COPY server/package.json server/package.json
-RUN npm ci --omit=dev --no-audit --no-fund --workspace=anishare-server --include-workspace-root
+WORKDIR /app/server
+COPY server/package.json server/package-lock.json ./
+RUN apk add --no-cache python3 make g++ \
+    && npm ci --omit=dev --no-audit --no-fund
 
-############################
-# 3. 运行时
-############################
+# TypeScript 7 uses a native compiler; build on glibc and ship only the emitted JS.
+FROM node:22-bookworm-slim AS build
+WORKDIR /app/server
+COPY server/package.json server/package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY server/tsconfig.json ./
+COPY server/src ./src
+RUN ./node_modules/.bin/tsc -p tsconfig.json
+
 FROM node:22-alpine AS runtime
-
-RUN apk add --no-cache ffmpeg tini \
-    && ffmpeg -hide_banner -version | head -1 \
-    && ffprobe -hide_banner -version | head -1
-
+RUN apk add --no-cache ffmpeg tini libstdc++
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=8088 \
@@ -40,18 +25,16 @@ ENV NODE_ENV=production \
     TRANSCODE_THREADS=2 \
     TRANSCODE_RC_LOOKAHEAD=10 \
     TRANSCODE_MUX_QUEUE=512
-
 WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
-COPY package.json ./
-COPY server ./server
-COPY --from=web /app/web/dist ./web/dist
-
+COPY --from=deps /app/server ./server
+COPY --from=build /app/server/dist ./server/dist
+COPY server/db ./server/db
+COPY server/config ./server/config
 RUN mkdir -p /app/data /media && chown -R node:node /app/data
-VOLUME ["/media"]
+VOLUME ["/media", "/app/data"]
 EXPOSE 8088
 USER node
-
-# tini 作为 init，保证 ffmpeg 子进程能被回收
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD node -e "fetch('http://127.0.0.1:8088/api/auth/session').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", "server/src/index.js"]
+CMD ["node", "server/dist/index.js"]

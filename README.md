@@ -1,216 +1,292 @@
-# AniShare · 番剧库
+# AniShare
 
-内网番剧文件管理器 + 在线播放器。托管一个本地文件夹（默认 `~/bangumi`），
-在浏览器里浏览、点开就播，支持 **H.264 / H.265(HEVC)** 与外挂 / 内挂字幕，**无需登录**。
+个人番剧库与在线播放器，采用独立的 Vue 3 前端和 Fastify API 后端。
+支持多个媒体库、SQLite 观看历史、密钥登录、直放 / HLS 转码、外挂 / 内挂字幕，以及 Pi Agent 模型配置。
 
-```
-┌──────────────┐   /api/*   ┌──────────────────────────┐
-│  Vue 3 + Vite│ ─────────► │  Node.js (Fastify)       │
-│  Artplayer   │            │  · 目录/番剧库 API        │
-│  hls.js      │ ◄───────── │  · Range 直链流           │
-└──────────────┘   HLS 分片  │  · ffmpeg 实时转码 + HLS 切片│
-                            └──────────────────────────┘
-```
+影视目录的 SQLite 结构见 [数据库设计](docs/database-design.md)，新增接口见 [影视库 API](docs/catalog-api.md)。后端自动升级到 v5 并创建业务表及数据源字段；现有页面接口保持兼容，自动扫描 / 下载执行器尚未接入。
 
-## 特性
+单条番剧资料支持 Bangumi 模糊搜索、ID / 链接预览及导入，配置与调用方式见 [元数据 API](docs/metadata-api.md)。各爬取来源独立配置代理，统一返回影视库字段。
 
-- **浏览**：番剧库首页（海报墙 / 继续观看 / 搜索）、文件夹视图（海报视图 / 列表视图、面包屑、筛选）
-- **播放**：
-  - H.264 / VP9 / AV1 + AAC 等浏览器原生支持的格式 → **直链播放**（Range 拖动，秒开）
-  - H.265(HEVC) 10bit / MKV / DTS 等浏览器放不了的 → **服务端实时转码为 H.264**，通过 HLS 分片播放，进度条可拖动
-  - 硬件编码自动探测（NVENC / VideoToolbox / VAAPI / QSV），不可用时自动回退 libx264
-- **字幕**：
-  - 外挂 `.ass/.ssa/.srt/.vtt`（自动匹配集数/文件名，GBK/BIG5 自动识别）→ 服务端转 WebVTT
-  - 内挂字幕（MKV 内封 ASS/SUP 等）→ 按轨道列出，可切换
-- **追番体验**：上一集/下一集、同目录选集、播放进度自动记录并续播
-- **纯内网**：监听 `0.0.0.0`，无鉴权，手机/平板/电视盒子浏览器可直接访问
+## 本地开发
 
-## 快速开始
+需要 **Node.js >= 22.19**（Pi SDK 要求）和 npm。视频探测、字幕提取和转码需要 ffmpeg / ffprobe。
+
+后端配置放在 `server/.env`，前端配置放在 `web/.env`，分别参照 `server/.env.example` 和 `web/.env.example` 创建。
+已有配置请保留，尤其是媒体目录、登录密钥和数据库路径。需要登录或 AI 后台时，在后端配置中设置 `AUTH_SECRET`。
+后端默认只加载 `server/.env`，不会读取根目录 `.env`；从旧版本迁移时保留原配置值。
+
+打开两个终端，均从项目根目录开始。终端一启动后端：
 
 ```bash
-# 1. 安装依赖（Node >= 20）
+cd server
 npm install
-
-# 2. 配置媒体目录（复制模板后修改）
-cp .env.example .env
-
-# 3. （可选）安装项目自带的 ffmpeg（免 root，用于探测/转码/抽字幕）
-npm run setup:ffmpeg      # 生成 tools/ffmpeg/bin/{ffmpeg,ffprobe}
-
-# 4. 构建前端并启动
-npm run build
-npm start                 # 或用 pm2 / systemd 守护
+npm run dev
 ```
 
-启动后终端会打印所有可访问地址（如 `http://192.168.50.142:8088`）。
-
-开发模式（前端热更新 + 后端 --watch）：
+终端二启动前端：
 
 ```bash
-npm run dev               # 后端 :8088，前端 http://localhost:5173
+cd web
+npm install
+npm run dev
 ```
 
-## Docker 部署（推荐）
+前端默认 `http://localhost:6001`，API 默认 `http://127.0.0.1:8088`。开发和预览均固定使用配置端口，占用时直接报错，不自动切换。
+不要使用 6000：Chromium 浏览器（包括 Chrome、Edge）将它列为受限端口，访问时可能出现 `ERR_UNSAFE_PORT`。
+前端通过 Vite 的 `/api` 代理访问后端；修改后端端口后，同时修改 `web/.env` 中的 `API_TARGET`。
+两个项目分别安装依赖和运行，根目录不提供 npm 脚本，也不使用 npm workspaces。
 
-镜像基于 `node:22-alpine`，内置 `ffmpeg`（含 libx264/libx265/libass），媒体目录以**挂载**方式使用。
+生产环境分别运行后端和构建前端：
 
 ```bash
-# 1. 构建镜像
-docker compose build
-
-# 2. 启动（默认把 /home/sakana/bangumi 挂到容器 /media，端口 8088）
-docker compose up -d
-
-# 3. 查看日志 / 停止
-docker compose logs -f
-docker compose down
+# 后端：从项目根目录进入 server
+cd server
+npm install --omit=dev
+npm start
 ```
-
-也可以直接用 docker 命令：
 
 ```bash
-docker build -t anishare:latest .
-
-docker run -d --name anishare \
-  -p 8088:8088 \
-  -v /home/sakana/bangumi:/media \
-  -v anishare-data:/app/data \
-  --memory 512m --memory-swap 512m \
-  --cpus 4 \
-  anishare:latest
+# 前端：另一个终端从项目根目录进入 web
+cd web
+npm install
+npm run build             # 生成 web/dist，部署到 Nginx 等静态服务器
+npm run preview           # 可选：本地预览构建结果，/api 代理到后端
 ```
 
-### 可调参数（`.env` 或环境变量）
+需要项目提供的 ffmpeg 安装脚本时，在 `server` 中执行 `npm run setup:ffmpeg`，或在根目录执行 `node scripts/install-ffmpeg.mjs`。
+
+后端访问 `/`、`/admin` 等前端路径返回 JSON 404。生产环境请单独部署前端，或使用下面的双服务 Docker 部署。
+
+## 分层结构
+
+前后端各自维护 `package.json`、`package-lock.json` 和 `node_modules`；根目录没有共享依赖清单或 workspace 配置。
+
+```text
+server/package.json           # 后端独立依赖与启动、构建、测试脚本
+server/package-lock.json      # 后端独立依赖锁
+server/tsconfig.json          # strict TypeScript 配置（src → dist）
+server/.env.example           # 后端配置模板，首次使用时创建 server/.env
+server/.env                   # 后端实际配置，不提交到版本库
+server/config/tasks.yaml      # 定时任务注册表，修改后热加载
+server/src/                   # 全部为 TypeScript
+├── index.ts                  # 进程启动、监听、退出
+├── app.ts                    # 组装 Model、Service、Controller、Agent
+├── routes.ts                 # 注册 Controller，无业务逻辑
+├── config.ts                 # 服务端环境变量
+├── errors.ts                 # 跨层应用错误
+├── types.ts                  # 领域实体与共享接口
+├── controller/               # HTTP 参数、Cookie、响应、错误映射
+├── service/                  # 业务校验与编排，不依赖 Fastify
+├── model/                    # SQLite、媒体文件与配置密钥持久化
+├── crawler/                  # Bangumi / 豆瓣抓取，带超时与重试
+├── scheduler/                # 定时任务基类、注册表、cron 调度与热加载
+│   └── tasks/                # 具体任务，继承 BaseTask
+└── agent/                    # Agent 定义与调度
+    ├── AgentManager.ts       # 注册、分派、统一模型配置
+    ├── base.agent.ts         # 基类：提示词、工具、预算
+    ├── agents/               # 具体 Agent（目前为番剧整理）
+    ├── tools/                # 媒体库读写工具
+    └── pi.runtime.ts         # 官方 Pi SDK 适配、模型请求、取消、超时
+```
+
+web/
+├── package.json              # 前端独立依赖与开发、构建、测试脚本
+├── package-lock.json         # 前端独立依赖锁
+├── .env.example              # 前端配置模板，复制为 web/.env
+├── .env                      # 前端实际配置，不提交到版本库
+├── src/views/                # 首页、媒体库、作品详情、浏览、播放器、登录、后台管理
+├── src/api.js                # 通过 /api 调用后端
+├── Dockerfile                # 独立前端镜像
+└── vite.config.js            # 开发和本地预览代理
+
+Dockerfile                    # 独立 API 镜像，含 ffmpeg
+deploy/nginx.conf             # 前端 SPA、/api 与 /assets/bangumi 反向代理
+docker-compose.yml            # web + server 两个服务
+```
+
+调用方向是 `Controller → Service → Model / Agent`。
+Controller 只负责传输层；Service 负责业务和任务编排；Model 负责数据与文件读写；Agent 隔离外部 Pi SDK。
+媒体转码与 HLS 分段留在播放 Service 中，原有 Range、HEAD、字幕及媒体库接口保持兼容。
+
+## 媒体库与历史
+
+媒体库的种类和 ID 由代码固定，环境变量只提供目录：
+
+```dotenv
+# 番剧库（必定存在）；未配置时回退 BANGUMI_ROOT / MEDIA_ROOT / ~/bangumi
+BANGUMI_LIBRARY=D:/Anime
+# 电影库：配置后才存在
+MOVIE_LIBRARY=E:/Movies
+```
+
+路径是服务端目录，Windows 建议使用正斜杠，Linux 可以使用 `/srv/anime` 等绝对路径。
+`MEDIA_LIBRARIES` 已废弃，保留配置会阻止启动；旧数据库中的 `default` 库会在迁移时自动归入 `bangumi`。
+
+首页提供继续观看、最近看的番剧和按日期分组的观看历史；媒体库页支持切换目录、搜索和文件浏览。海报优先使用已绑定媒体的 Bangumi 封面，点击作品进入详情页，可查看抓取资料并按季选集播放；没有绑定媒体的目录仍按磁盘内容显示。
+两个库中相同的相对视频路径分别保存进度、封面和字幕。离线库不影响其他库；移除库后仍可删除保留的历史。
+
+目录可以任意分层，推荐：
+
+```text
+~/bangumi/
+└── 番剧名/
+    ├── poster.jpg
+    └── Season 1/
+        ├── 番剧名 S01E01.mkv
+        └── 番剧名 S01E01.chs.ass
+```
+
+支持 H.264 / VP9 / AV1 等原生直放；不兼容的编码或 MKV 等容器通过 ffmpeg 转成 H.264 HLS。
+硬件编码不可用时自动回退 libx264。封面识别 poster / cover / folder 等名称；字幕支持 ASS、SSA、SRT、VTT 和内封文本字幕，图形字幕不能直接转换为文本外挂。
+
+## 登录与后台管理
+
+设置 `AUTH_SECRET` 后开启单密钥登录；未设置时媒体库保持免登录。
+模型服务配置及 Agent 调用始终要求已配置登录并持有有效会话。
+
+登录后进入“后台管理 → 模型服务”，填写：
+
+- API 格式：OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages。
+- Base URL：OpenAI 兼容服务一般包含 `/v1`；Anthropic 一般填写服务根地址。
+- 模型 ID：供应商提供的完整模型名称。
+- API Key：支持保存或明确移除；留空保持现有密钥。本地免鉴权服务可以不填。
+- 最大输出 Token 和超时：可在高级设置中调整。
+
+“测试连接”用当前草稿执行一次实际 Pi Agent 请求，不自动保存；“保存配置”写入 SQLite，立即生效。
+API Key 用 AES-256-GCM 加密，GET 接口只返回是否已配置，不返回原始密钥。浏览器不持久化密钥。
+首次保存前可使用 `AI_*` 环境变量作为初始配置，保存后以数据库为准；明确移除不会再回退到环境变量密钥。
+
+Pi 适配使用 [官方 Agent SDK](https://github.com/earendil-works/pi/tree/main/packages/agent)，每次调用为独立任务，支持取消和超时。
+当前未给 Agent 开放 Shell 或文件修改工具。配置和连接测试不会读取用户的 Pi CLI 配置或全局凭据。
+
+后台管理包含以下分区：
+
+- 「媒体库」优先展示 `media` 表中已扫描或抓取到的媒体，可按标题 / 系列搜索、按类型筛选，查看封面、季集、来源（Bangumi / 豆瓣 / 本地扫描）、抓取与更新时间；展开详情可看简介、标签、来源信息和原始属性。整张表为空时自动回退显示磁盘扫描到的目录，标注为磁盘数据，便于确认哪些内容还没有入库。
+- 「任务记录」展示 `task` 表的每次运行，支持按状态筛选，查看任务参数、执行结果与错误，取消排队中的任务，删除已结束的记录；有任务运行时自动刷新列表。
+- 「定时任务」列出 `server/config/tasks.yaml` 注册的任务、cron、下次运行时间和运行状态，每行可「立即运行」手动触发，也可「重新加载配置」。
+- 定时任务默认 `enabled: false`，不会按 cron 自动运行，只能手动触发；需要恢复自动调度时把对应任务的 `enabled` 改为 `true`，配置热加载后生效。
+
+## 配置
+
+后端模板见 [`server/.env.example`](server/.env.example)，由后端读取 `server/.env`。
+前端独立使用 [`web/.env.example`](web/.env.example) 和 `web/.env`，不会读取后端的密钥配置。
+根目录不再存放共享 `.env`。配置文件迁移不改变数据位置：相对的 `DATA_DIR`、`DB_PATH` 仍以项目根目录为基准，默认数据目录仍是项目根目录下的 `data/`。
+
+前端配置：
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `BANGUMI_DIR` | `/home/sakana/bangumi` | **宿主机上的番剧目录**（挂载到容器 `/media`；可加 `:ro` 只读） |
-| `PORT` | `8088` | 宿主机端口 |
-| `CPUS` | `4` | CPU 限额；多路转码时可调大 |
-| `HLS_SEGMENT_SECONDS` | `5` | 分片长度 |
-| `HLS_CACHE_MAX_MB` | `1024` | 分片缓存上限 |
-| `TRANSCODE_AUDIO_BITRATE` | `192k` | 转码音频码率 |
+| `WEB_PORT` | `6001` | 前端开发 / 预览端口，占用时直接报错 |
+| `API_TARGET` | `http://127.0.0.1:8088` | Vite 开发 / 预览的后端代理地址，不写入浏览器代码 |
 
-要点：
+后端配置：
 
-- **内存上限 512MB**：`mem_limit: 512m` 同时限制 Node 与 ffmpeg 子进程的总内存；`memswap_limit` 与之相等即禁用交换。
-  转码的内存占用与分辨率/并发数相关，1080p 单路软件转码约 150~250MB，**建议同时观看不超过 2 路**。
-  若出现 ffmpeg 被 OOM 杀掉，把 `mem_limit` 调到 `1g` 或降低并发。
-- **数据卷**：`anishare-data` 挂到 `/app/data`，存放转码分片缓存（容器重启会自动清空缓存，卷本身只占磁盘）。
-- **GPU 加速**：默认关闭。宿主机装了 `nvidia-container-toolkit` 且想用 NVENC 时，取消 `docker-compose.yml` 里
-  `deploy.resources.reservations.devices` 的注释；容器内会自动探测可用编码器，不可用则回退 libx264。
-- 容器内默认 `HOST=0.0.0.0`，手机 / 电视盒子用宿主机内网 IP + 端口访问即可。
-
-## 配置（环境变量 / `.env`）
-
-| 变量 | 默认值 | 说明 |
+| 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `BANGUMI_ROOT` | `~/bangumi` | **要托管的媒体根目录**（也兼容 `MEDIA_ROOT`） |
-| `HOST` | `0.0.0.0` | 监听地址（内网访问需要 0.0.0.0） |
-| `PORT` | `8088` | 端口 |
-| `FFMPEG_PATH` / `FFPROBE_PATH` | 自动查找 | 自定义 ffmpeg 路径（优先级：环境变量 > `tools/ffmpeg/bin` > PATH） |
-| `TRANSCODE_VIDEO_CODEC` | 自动 | 强制指定编码器，如 `libx264`、`h264_nvenc`、`h264_videotoolbox` |
-| `TRANSCODE_VIDEO_BITRATE` | 源码率 | 转码码率，如 `6M` |
-| `TRANSCODE_AUDIO_BITRATE` | `192k` | 转码音频码率 |
-| `TRANSCODE_TONEMAP` | `1` | HDR→SDR 色调映射开关（设 `0` 关闭） |
-| `HLS_SEGMENT_SECONDS` | `5` | HLS 分片长度（秒） |
+| `BANGUMI_LIBRARY` | `BANGUMI_ROOT` / `~/bangumi` | 番剧库目录 |
+| `MOVIE_LIBRARY` | 空 | 电影库目录，不配置则不存在该库 |
+| `HOST` / `PORT` | `0.0.0.0` / `8088` | 本地 API 监听地址与端口；Compose 中 PORT 是前端对外端口 |
+| `AUTH_SECRET` | 空 | 单密钥登录，修改后重启，旧会话失效 |
+| `SESSION_DAYS` | `30` | 会话有效天数 |
+| `COOKIE_SECURE` | `0` | HTTPS 反向代理部署设为 `1` |
+| `FRONTEND_ORIGINS` | 空 | 额外允许的前端 Origin，逗号分隔；同源代理不需要设置 |
+| `DATA_DIR` | `./data` | 运行数据与配置加密密钥目录，相对项目根目录，默认不是 server/data |
+| `DB_PATH` | `DATA_DIR/anishare.sqlite` | SQLite 文件，自动创建和迁移 |
+| `TASKS_CONFIG` | `server/config/tasks.yaml` | 定时任务注册文件，修改后热加载；默认 `enabled: false` 只允许手动触发 |
+| `AI_ENABLED` | `0` | 首次保存前的 Agent 启用状态 |
+| `AI_API_FORMAT` | `openai-completions` | 初始模型 API 格式 |
+| `AI_BASE_URL` / `AI_MODEL` / `AI_API_KEY` | 空 | 初始上游地址、模型、密钥 |
+| `AI_MAX_TOKENS` / `AI_TIMEOUT_MS` | `2048` / `30000` | 初始输出上限与超时毫秒数 |
+| `AI_CONFIG_KEY` | 空 | 可选的 32 字节 Base64 加密密钥；否则自动创建 `DATA_DIR/ai-config.key` |
+| `FFMPEG_PATH` / `FFPROBE_PATH` | 自动查找 | 自定义 ffmpeg / ffprobe 路径 |
+| `TRANSCODE_VIDEO_CODEC` | 自动 | 编码器，例如 libx264 或 h264_nvenc |
+| `TRANSCODE_VIDEO_BITRATE` | 源码率 | 如 4M、6M |
+| `TRANSCODE_AUDIO_BITRATE` | `192k` | 音频码率 |
+| `TRANSCODE_TONEMAP` | `1` | HDR → SDR 色调映射 |
+| `HLS_SEGMENT_SECONDS` | `5` | HLS 分片秒数 |
 | `HLS_IDLE_TIMEOUT_MS` | `300000` | 转码会话空闲回收时间 |
 
-`~/bangumi` 目录结构建议如下（也支持任意层级，文件浏览可以一层层点进去）：
+SQLite 保存会话、分库观看进度和 AI 配置。旧数据库会自动迁移，浏览器旧观看记录会合并导入。
+临时断网时进度保留在本地待同步；远程删除的历史不会被普通浏览器缓存重新导入。
+备份时先停止 API，再同时备份 SQLite 和 `ai-config.key`；若使用 `AI_CONFIG_KEY`，同时保留该环境变量的值。
 
-```
-~/bangumi/
-└── 某番剧/
-    ├── poster.jpg                  # 可选：封面图（poster/cover/folder/fanart 开头都行）
-    └── Season 1/
-        ├── [组名] 番剧名 - 01 [1080p][HEVC].mkv     # 内封字幕
-        ├── 番剧名 01.chs.ass                        # 外挂字幕（按集数自动匹配）
-        └── 番剧名 01.cht.ass
-```
+## Docker 双服务部署
 
-字幕匹配规则：同名/包含关系 → 集数相同（`S01E02` / 第2话 / `[02]`）→（目录里只有一个视频时）全部视为该视频字幕。
+从项目根目录执行以下命令；Compose 文件仍为根目录的 `docker-compose.yml`，配置从 `server/.env` 加载：
 
-## 目录结构
-
-```
-anishare/
-├── server/                 # Node 后端（Fastify，ESM）
-│   └── src/
-│       ├── index.js        # 启动、静态资源、SPA 回退
-│       ├── config.js       # .env 加载与配置
-│       ├── media.js        # 目录/番剧库扫描、字幕匹配、路径安全
-│       ├── ffmpeg.js       # ffmpeg 探测、ffprobe、转码参数、字幕抽取
-│       ├── hls.js          # TS→HLS 分段器（边转码边切片）+ 会话管理
-│       └── routes.js       # HTTP API
-├── web/                    # Vue 3 前端（Vite + Artplayer + hls.js）
-│   └── src/
-│       ├── views/{Home,Browse,Player}.vue
-│       └── components/Poster.vue
-├── scripts/
-│   ├── dev.mjs             # 一键开发模式
-│   └── install-ffmpeg.mjs  # 免 root 安装 ffmpeg（Ubuntu deb 重定位）
-├── Dockerfile              # 多阶段构建（前端 → 后端 → 运行时，内置 ffmpeg）
-├── docker-compose.yml      # 挂载媒体目录、内存限制 512m
-├── deploy/anishare.service # systemd 部署示例
-└── tools/ffmpeg/           # setup:ffmpeg 的产物（不入库）
+```bash
+docker compose --env-file server/.env up -d --build --remove-orphans
+docker compose --env-file server/.env logs -f server web
+docker compose --env-file server/.env down
 ```
 
-## API 一览
+访问 `http://服务器地址:8088`，或者 `server/.env` 中配置的 `PORT`。本地直接启动时 `PORT` 是 API 端口，Compose 中则是前端对外发布的端口。
+`web` 容器运行 Nginx，提供 Vue 页面并代理 `/api`；`server` 运行 Node API，不对外发布端口。
+从旧单容器版本升级时，`--remove-orphans` 会移除旧服务容器并释放端口，已有 `anishare-data` 命名卷继续使用。
+不要加 `down -v`，除非确实要清空观看历史、会话和 AI 配置。
 
-| 接口 | 说明 |
+多库需要挂载对应目录，并为每种库配置容器内路径：
+
+```yaml
+volumes:
+  - /srv/anime:/media/anime:ro
+  - /srv/films:/media/films:ro
+  - anishare-data:/app/data
+```
+
+```dotenv
+BANGUMI_LIBRARY=/media/anime
+MOVIE_LIBRARY=/media/films
+```
+
+前端可独立执行 `docker build -f web/Dockerfile -t anishare-web .`；后端可独立执行 `docker build -t anishare-server .`。
+自建前端托管时复用 `deploy/nginx.conf` 的 SPA、`/api` 与 `/assets/bangumi` 配置，并将 API 上游改为实际后端地址。封面由后端从 `DATA_DIR/bangumi` 提供，不能只代理 `/api`，否则媒体库表格和海报墙会显示首字占位图。
+
+## HTTP API
+
+| 接口 | 用途 |
 | --- | --- |
-| `GET /api/status` | 媒体目录、ffmpeg 路径、可用编码器 |
-| `GET /api/library` | 番剧库总览（一部番剧一张卡片、封面、集数） |
-| `GET /api/list?path=/` | 目录列表（虚拟路径，URL 编码） |
-| `GET /api/video?path=...` | 视频信息：编码、时长、是否需转码、字幕列表、同目录选集 |
-| `GET /api/stream?path=...` | 直链（支持 Range / HEAD） |
-| `GET /api/subtitle?path=...` | 外挂字幕 → WebVTT |
-| `GET /api/stream-subtitle?path=...&index=N` | 内挂字幕 → WebVTT |
-| `GET /api/hls/start?path=...&t=0` | 创建（或复用）转码会话，返回 m3u8 地址 |
-| `GET /api/hls/:id/index.m3u8` | 播放列表 |
-| `GET /api/hls/:id/seg/:name` | 分片 |
-| `GET /api/hls/:id/info` | 会话进度（已转码到哪 / 是否结束） |
-| `DELETE /api/hls/:id` | 停止转码会话 |
+| `GET /api/auth/session` | 登录状态 |
+| `POST /api/auth/login` / `POST /api/auth/logout` | 密钥登录 / 注销 |
+| `GET /api/status` | 媒体库、SQLite、ffmpeg 状态 |
+| `GET /api/libraries` | 多库名称、可用状态和缓存数量，未知数量为 null |
+| `GET /api/library?library=ID` | 指定库的海报列表，附带已绑定媒体的封面 / 标题和媒体数量 |
+| `GET /api/library/series?library=ID&path=...` | 作品详情：绑定媒体、封面资料与按季剧集列表 |
+| `GET /api/list?library=ID&path=...` | 文件目录 |
+| `GET /api/video?library=ID&path=...` | 视频、同目录选集、字幕信息 |
+| `GET/HEAD /api/stream` / `/api/file` | 带 Range 的媒体传输 |
+| `GET /api/subtitle` / `/api/stream-subtitle` | 外挂 / 内挂字幕转 WebVTT |
+| `GET /api/hls/start?library=ID&path=...&t=0` | 创建转码会话 |
+| `GET /api/hls/:id/index.m3u8` / `/seg/:name` / `/info` | 播放列表、分片、转码状态 |
+| `DELETE /api/hls/:id` | 结束转码 |
+| `GET/PUT/DELETE /api/progress` | 查询 / 保存 / 删除分库进度 |
+| `POST /api/progress/import` | 合并旧记录，单次最多 500 条 |
+| `GET/PUT /api/admin/ai/config` | 查询脱敏配置 / 保存模型配置 |
+| `POST /api/admin/ai/test` | 测试草稿配置 |
+| `POST /api/agent/run` | 使用已保存配置运行 Pi，正文 `{ "prompt": "..." }` |
+| `GET /api/lib-folders` | 已扫描目录树与统计，详见 [扫描与定时任务 API](docs/scan-api.md) |
+| `POST /api/libraries/:id/scan` | 手动触发扫描，返回任务 ID |
+| `GET /api/tasks` / `GET /api/tasks/:id` | 任务记录列表 / 详情 |
+| `POST /api/tasks/:id/cancel` / `DELETE /api/tasks/:id` | 取消排队任务 / 删除已结束任务 |
+| `GET /api/scheduler/tasks` | 定时任务与下次运行时间 |
+| `POST /api/scheduler/tasks/:type/run` | 立即触发一个定时任务 |
+| `POST /api/scheduler/reload` | 重新读取 tasks.yaml |
 
-路径参数都是相对媒体根目录的虚拟路径（`/番剧/Season 1/xxx.mkv` 的 URL 编码形式），
-服务端会用 `path.resolve` 限制在根目录内，**禁止目录穿越**。
+媒体路径为相对所选库的虚拟路径，限制目录穿越、Windows 路径绕过和跨库软链接访问。
+启用登录时，媒体、字幕、HLS、进度及后台接口均使用 HttpOnly Cookie 鉴权。
 
-## 实现要点
+## 检查
 
-- **为什么要转码**：浏览器 `<video>` / MSE 不支持 HEVC 解码。服务端用 ffmpeg 把 `HEVC → H.264`，
-  以 5 秒左右一个关键帧切片，通过 HLS 喂给 hls.js；用户拖动到已生成过的位置可立即回放，
-  拖到未生成的位置则从该点新建一个转码会话（`-ss` 在 `-i` 之前，秒级定位）。
-- **分段器**（`server/src/hls.js`）：直接解析 ffmpeg 输出的 MPEG-TS 包，按视频 IDR 切片
-  （处理了 mpegts 每包带 PES 头、NAL 跨包、CBR 填充伪造起始码、PTS 26.5 小时回绕等问题），
-  `#EXT-X-PLAYLIST-TYPE:EVENT` 让 hls.js 可以在已缓存区间内原生拖动。
-- **直链优先**：能原生播放的一律直链（Range），不浪费 CPU。
-- **ffmpeg 可用性**：启动时用真实视频帧探测硬件编码器（GPU 被其他任务占用时会自动回退），
-  某个源上硬件链路失败也会自动降级为软解软编。
-
-## 常见问题
-
-- **提示“无 ffmpeg”**：执行 `npm run setup:ffmpeg`，或 `export FFMPEG_PATH=/path/to/ffmpeg`。
-- **H.265 卡顿**：默认码率跟源文件走。可调小 `TRANSCODE_VIDEO_BITRATE=4M`；
-  有可用 GPU 时确认 `/api/status` 里 `transcode` 不是 `libx264`。
-- **双击播放出现 2~3 秒黑屏**：转码首帧需要时间（`ffmpeg -ss` + 首个关键帧），属正常现象；已看过的剧集再次打开会更快（分片已缓存）。
-- **拖动进度条**：已转码过的区间立即跳转；跳到尚未转码的位置会从该点新建转码会话，
-  首次约 2~4 秒（`ffmpeg -ss` 定位 + 首片生成），期间显示“正在从 X 开始转码…”。
-- **容器里 ffmpeg 被 OOM 杀掉**：说明 512MB 上限不够当前并发，二选一：调大 `mem_limit`，或减少同时观看人数。
-- **图形字幕（sup/idx）**：无法以文本形式外挂，播放器会标注“图形字幕”。
-- **开机自启**：用 systemd 示例即可：
-
-```ini
-# /etc/systemd/system/anishare.service
-[Unit]
-Description=AniShare
-After=network.target
-
-[Service]
-WorkingDirectory=/home/sakana/workspace/anishare
-ExecStart=/usr/bin/node server/src/index.js
-Environment=BANGUMI_ROOT=/home/sakana/bangumi
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
+```bash
+npm --prefix server run typecheck   # tsc --noEmit，strict 模式
+npm --prefix server run build       # 编译到 server/dist
+npm --prefix server test            # Node 原生运行 .test.ts
+npm --prefix web test
+npm --prefix web run build
+docker compose --env-file server/.env config --quiet
 ```
+
+后端源码是 TypeScript：开发时 `node --watch src/index.ts` 直接跑（Node ≥ 22.19 的类型剥离），生产用 `npm run build` 编译到 `dist/`。Agent 的注册与扩展方式见 [Agent 架构](docs/agent-architecture.md)。
+
+测试包含数据库升级、多库隔离、登录与 CSRF、Range / HEAD、API 与前端分离、AI 配置加密、草稿测试不保存，以及三个模型协议的真实 Pi SDK 本地模拟上游测试。
+测试不需要真实模型 API Key，也不会调用付费模型服务。

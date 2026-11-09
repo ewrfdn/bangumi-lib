@@ -1,225 +1,78 @@
 <script setup>
-import { onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { api } from './api'
+import { auth, logout } from './auth'
+import Icon from './components/Icon.vue'
 
 const route = useRoute()
+const router = useRouter()
 const status = ref(null)
+const statusBusy = ref(false)
 const showStatus = ref(false)
+const loggingOut = ref(false)
+const logoutError = ref('')
+const hasShell = computed(() => Boolean(route.name) && auth.checked && !['watch', 'login'].includes(route.name))
+const libraryQuery = computed(() => route.query.library ? { library: route.query.library } : {})
+const statusSources = computed(() => status.value?.libraries || [])
 
-onMounted(async () => {
-  try {
-    status.value = await api.status()
-  } catch {}
-})
-
-const isPlayer = () => route.name === 'watch'
+watch(() => [route.name, auth.authenticated, auth.checked], async () => {
+  showStatus.value = false
+  if (!hasShell.value || (auth.enabled && !auth.authenticated) || status.value || statusBusy.value) return
+  await loadStatus()
+}, { immediate: true })
+async function loadStatus() {
+  statusBusy.value = true
+  try { status.value = await api.status() } catch {}
+  finally { statusBusy.value = false }
+}
+async function exit() {
+  loggingOut.value = true
+  logoutError.value = ''
+  try { await logout(); status.value = null; await router.replace('/login') }
+  catch (e) { logoutError.value = e.message }
+  finally { loggingOut.value = false }
+}
 </script>
 
 <template>
-  <div class="app" :class="{ 'is-player': isPlayer() }">
-    <header v-if="!isPlayer()" class="topbar">
+  <div class="app">
+    <a v-if="hasShell" class="skip-link" href="#main-content">跳到内容</a>
+    <header v-if="hasShell" class="topbar">
       <div class="container topbar-inner">
-        <router-link to="/" class="brand">
-          <span class="logo">
-            <svg viewBox="0 0 32 32" width="22" height="22" aria-hidden="true">
-              <path d="M5 7h22a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3V10a3 3 0 0 1 3-3z" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round" />
-              <path d="M13 12l8 4.5-8 4.5z" fill="currentColor" />
-            </svg>
-          </span>
-          <span class="brand-text">Ani<span>Share</span></span>
-        </router-link>
-
-        <nav class="nav">
-          <router-link to="/" class="nav-link" exact-active-class="active">番剧库</router-link>
-          <router-link to="/browse" class="nav-link" active-class="active">浏览文件</router-link>
+        <router-link to="/" class="brand" aria-label="AniShare 首页"><span class="logo"><Icon name="play" :size="16" /></span>AniShare</router-link>
+        <nav class="nav" aria-label="主导航">
+          <router-link :to="{ name: 'home' }" :class="{ active: route.name === 'home' }">首页</router-link>
+          <router-link :to="{ name: 'library', query: libraryQuery }" :class="{ active: route.name === 'library' }">媒体库</router-link>
+          <router-link class="file-nav" :to="{ name: 'browse', query: libraryQuery }" :class="{ active: route.name === 'browse' }">文件浏览</router-link>
+          <router-link :to="{ name: 'admin' }" :class="{ active: route.name === 'admin' }">后台管理</router-link>
         </nav>
-
-        <div class="spacer" />
-
-        <button class="status-pill" :class="{ ok: status?.ffmpeg, bad: status && !status.ffmpeg }" title="服务状态" @click="showStatus = !showStatus">
-          <span class="dot" />
-          <span class="pill-label">{{ status ? (status.ffmpeg ? '转码就绪' : '无 ffmpeg') : '连接中' }}</span>
-        </button>
-
-        <transition name="fade">
-          <div v-if="showStatus && status" class="status-card" @click.self="showStatus = false">
-            <div class="status-head">
-              <strong>服务状态</strong>
-              <button class="btn small ghost" @click="showStatus = false">关闭</button>
-            </div>
-            <dl>
-              <dt>媒体目录</dt><dd class="mono">{{ status.root }}</dd>
-              <dt>目录存在</dt><dd>{{ status.rootExists ? '是' : '否（请检查 BANGUMI_ROOT）' }}</dd>
-              <dt>ffmpeg</dt><dd class="mono">{{ status.ffmpeg || '未找到' }}</dd>
-              <dt>ffprobe</dt><dd class="mono">{{ status.ffprobe || '未找到' }}</dd>
-              <dt>转码编码器</dt>
-              <dd><span class="chip" :class="status.transcode ? 'ok' : 'err'">{{ status.transcode?.encoder || '不可用' }}</span></dd>
-              <dt>硬件加速</dt><dd class="mono">{{ (status.hwaccels || []).join(', ') || '—' }}</dd>
-            </dl>
-          </div>
-        </transition>
+        <div class="topbar-end"><span v-if="auth.enabled" class="auth-label"><Icon name="shield" :size="13" />密钥访问</span><button class="icon-button service-button" :aria-expanded="showStatus" aria-controls="service-status" @click="showStatus = !showStatus" title="服务状态" aria-label="服务状态"><Icon name="settings" :size="18" /></button><button v-if="auth.enabled && auth.authenticated" class="icon-button" title="退出登录" aria-label="退出登录" :disabled="loggingOut" @click="exit"><Icon name="logout" :size="18" /></button></div>
+        <div v-if="showStatus" id="service-status" class="status-card">
+          <div class="status-head"><strong>服务状态</strong><button class="icon-button" aria-label="关闭服务状态" @click="showStatus = false"><Icon name="close" :size="16" /></button></div>
+          <dl v-if="status">
+            <template v-if="statusSources.length"><template v-for="source in statusSources" :key="source.id"><dt>{{ source.name }}</dt><dd><span>{{ source.available === false ? '未连接' : '已连接' }}</span><code v-if="source.root">{{ source.root }}</code></dd></template></template>
+            <template v-else><dt>媒体目录</dt><dd><span>{{ status.rootExists ? '已连接' : '未找到目录' }}</span><code>{{ status.root }}</code></dd></template>
+            <dt>视频转码</dt><dd>{{ status.transcode?.encoder || (status.ffmpeg ? '已就绪' : '未找到 ffmpeg') }}</dd>
+            <dt v-if="status.database">观看记录</dt><dd v-if="status.database">SQLite</dd>
+            <dt>访问方式</dt><dd>{{ auth.enabled ? '密钥登录' : '直接访问' }}</dd>
+          </dl>
+          <div v-else class="status-empty"><p>{{ statusBusy ? '正在连接服务…' : '暂时无法连接服务' }}</p><button v-if="!statusBusy" class="btn small" @click="loadStatus">重试</button></div>
+        </div>
       </div>
     </header>
-
-    <main class="main">
-      <router-view v-slot="{ Component }">
-        <transition name="fade" mode="out-in">
-          <component :is="Component" :key="route.fullPath" />
-        </transition>
-      </router-view>
-    </main>
+    <div v-if="logoutError" class="container notice err" role="alert">{{ logoutError }}</div>
+    <main id="main-content"><router-view v-slot="{ Component }"><component :is="Component" :key="route.path + JSON.stringify(route.query)" /></router-view></main>
   </div>
 </template>
 
 <style scoped>
-.app {
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-}
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 50;
-  height: var(--header-h);
-  background: rgba(11, 13, 18, 0.72);
-  backdrop-filter: saturate(160%) blur(18px);
-  -webkit-backdrop-filter: saturate(160%) blur(18px);
-  border-bottom: 1px solid var(--line);
-}
-.topbar-inner {
-  height: 100%;
-  display: flex;
-  align-items: center;
-  gap: 28px;
-  position: relative;
-}
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-weight: 800;
-  font-size: 18px;
-  letter-spacing: 0.2px;
-}
-.logo {
-  width: 34px;
-  height: 34px;
-  display: grid;
-  place-items: center;
-  border-radius: 11px;
-  background: var(--grad);
-  color: #fff;
-  box-shadow: 0 6px 20px -8px rgba(124, 92, 255, 0.9);
-}
-.brand-text span {
-  background: var(--grad);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-.nav {
-  display: flex;
-  gap: 4px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--line);
-  padding: 4px;
-  border-radius: 999px;
-}
-.nav-link {
-  padding: 6px 16px;
-  border-radius: 999px;
-  font-size: 14px;
-  color: var(--text-dim);
-  transition: all 0.18s ease;
-}
-.nav-link:hover {
-  color: var(--text);
-}
-.nav-link.active {
-  background: var(--bg-elev-2);
-  color: var(--text);
-  box-shadow: inset 0 0 0 1px var(--line-strong);
-}
-.spacer {
-  flex: 1;
-}
-.status-pill {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 32px;
-  padding: 0 12px;
-  border-radius: 999px;
-  font-size: 13px;
-  color: var(--text-dim);
-  border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.03);
-}
-.dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--warn);
-  box-shadow: 0 0 0 3px rgba(255, 176, 32, 0.15);
-}
-.status-pill.ok .dot {
-  background: var(--ok);
-  box-shadow: 0 0 0 3px rgba(56, 214, 160, 0.15);
-}
-.status-pill.bad .dot {
-  background: var(--err);
-  box-shadow: 0 0 0 3px rgba(255, 92, 108, 0.15);
-}
-.status-card {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 10px);
-  width: min(560px, 92vw);
-  padding: 18px 20px;
-  background: rgba(23, 27, 38, 0.96);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  backdrop-filter: blur(20px);
-}
-.status-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-}
-.status-card dl {
-  margin: 0;
-  display: grid;
-  grid-template-columns: 92px 1fr;
-  gap: 8px 12px;
-  font-size: 13px;
-}
-.status-card dt {
-  color: var(--text-faint);
-}
-.status-card dd {
-  margin: 0;
-  word-break: break-all;
-}
-.main {
-  flex: 1;
-  min-height: 0;
-}
-.is-player .main {
-  min-height: 100vh;
-}
-@media (max-width: 640px) {
-  .pill-label {
-    display: none;
-  }
-  .nav-link {
-    padding: 6px 12px;
-  }
-  .brand-text {
-    display: none;
-  }
-}
+.app { min-height: 100vh; }.skip-link { position: fixed; top: -100px; left: 15px; z-index: 100; padding: 11px 16px; border-radius: 6px; color: #fff; background: #9c7cf4; font-size: 13px; }.skip-link:focus { top: 10px; }
+.topbar { height: 62px; border-bottom: 1px solid var(--line); background: #0e0e15ed; position: sticky; top: 0; z-index: 40; backdrop-filter: blur(16px); }
+.topbar-inner { position: relative; height: 100%; display: flex; align-items: center; gap: 47px; }.brand { display: flex; align-items: center; gap: 9px; font-size: 18px; font-weight: 650; letter-spacing: -.5px; }.logo { width: 28px; height: 28px; color: #d6c6ff; background: #a78bfa17; border: 1px solid #a78bfa30; border-radius: 8px; display: grid; place-items: center; }.nav { display: flex; gap: 29px; height: 100%; }.nav a { position: relative; display: flex; align-items: center; font-size: 13px; color: var(--text-faint); white-space: nowrap; }.nav a:hover { color: var(--text); }.nav a.active { color: #ccb8ff; }.nav a.active::after { content: ''; height: 2px; background: var(--accent); position: absolute; bottom: 0; left: 0; right: 0; }
+.topbar-end { display: flex; align-items: center; gap: 10px; margin-left: auto; }.auth-label { display: inline-flex; align-items: center; gap: 5px; color: var(--text-faint); font-size: 11px; margin-right: 9px; }.auth-label svg { color: #b3a3ca; }.icon-button { display: inline-flex; align-items: center; justify-content: center; width: 31px; height: 31px; padding: 0; border-radius: 6px; color: var(--text-faint); }.icon-button:hover { background: var(--bg-elev-2); color: var(--text); }.icon-button:disabled { opacity: .4; }
+.status-card { position: absolute; top: calc(100% + 8px); right: 0; width: min(430px, calc(100vw - 20px)); padding: 19px; background: #17171f; border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: var(--shadow); }.status-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }.status-head strong { font-size: 14px; font-weight: 500; }.status-card dl { margin: 0; display: grid; grid-template-columns: 78px 1fr; gap: 14px 16px; font-size: 12px; line-height: 1.6; }.status-card dt { color: var(--text-faint); overflow-wrap: anywhere; }.status-card dd { margin: 0; overflow-wrap: anywhere; }.status-card code { display: block; color: var(--text-faint); font: 10px/1.7 ui-monospace,monospace; margin-top: 4px; }.status-empty { font-size: 12px; color: var(--text-faint); }
+@media(max-width:700px) { .topbar-inner { gap: 30px; }.nav { gap: 23px; }.auth-label { display: none; } }
+@media(max-width:450px) { .nav .file-nav { display: none; }.topbar { height: 56px; }.topbar-inner { gap: 21px; }.brand { font-size: 16px; gap: 7px; }.logo { width: 24px; height: 24px; border-radius: 6px; }.nav { gap: 17px; }.nav a { font-size: 12px; }.topbar-end { gap: 3px; }.icon-button { width: 26px; height: 28px; } }
+@media(max-width:380px) { .topbar-inner { gap: 17px; }.brand { font-size: 15px; }.logo { display: none; }.nav { gap: 15px; }.nav .file-nav { display: none; } }
 </style>

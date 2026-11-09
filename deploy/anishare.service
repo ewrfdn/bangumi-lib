@@ -1,5 +1,5 @@
 [Unit]
-Description=AniShare 番剧库
+Description=AniShare API 后端
 After=network-online.target
 Wants=network-online.target
 
@@ -7,11 +7,13 @@ Wants=network-online.target
 Type=simple
 User=sakana
 WorkingDirectory=/home/sakana/workspace/anishare
-EnvironmentFile=/home/sakana/workspace/anishare/.env
-ExecStart=/usr/bin/env node server/src/index.js
+EnvironmentFile=/home/sakana/workspace/anishare/server/.env
+# 先执行 npm --prefix server run build，部署时只需 server/dist 与 server/db
+ExecStart=/usr/bin/env node server/dist/index.js
 Restart=on-failure
 RestartSec=3
 # 转码需要读取媒体目录与访问 GPU
+# 前端需单独构建并部署到 Nginx；此服务只监听 API。
 Nice=-5
 
 [Install]
