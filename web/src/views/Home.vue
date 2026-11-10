@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import Poster from '../components/Poster.vue'
 import Icon from '../components/Icon.vue'
-import { api, fmtTime, parseEpisode, prettyTitle } from '../api'
+import { api, fmtTime, mediaCoverUrl, parseEpisode, prettyTitle } from '../api'
 import { getProgress, deleteProgress } from '../progress'
 
 const router = useRouter()
@@ -43,6 +43,8 @@ const records = computed(() => progress.value.filter(item => item.path).map(item
   const time = Math.max(0, Number(item.time) || 0)
   return {
     ...item, libraryId, seriesPath, seriesTitle, episodeLabel, time, duration,
+    catalogPath: matched?.path || '',
+    cover: matched?.media?.cover ? mediaCoverUrl(matched.media.cover, libraryId) : '',
     poster: item.poster || matched?.poster || '',
     sourceName: source?.name || item.libraryName || libraryId || '媒体库',
     sourceUnavailable: sourcesLoaded.value && (!source || source.available === false),
@@ -89,8 +91,7 @@ async function load() {
   } else error.value = sources.reason.message
   if (history.status === 'fulfilled') progress.value = history.value
   else error.value = error.value || history.reason.message
-  const ids = [...new Set(progress.value.filter(item => !item.seriesPath || !item.seriesTitle)
-    .map(item => item.libraryId || defaultLibraryId.value))]
+  const ids = [...new Set(progress.value.map(item => item.libraryId || defaultLibraryId.value))]
     .filter(id => id && libraries.value.some(source => source.id === id && source.available !== false))
   const results = await Promise.allSettled(ids.map(id => api.library(id)))
   const nextCatalogs = { ...catalogs.value }
@@ -106,7 +107,9 @@ function openRecord(item) {
   router.push({ name: 'watch', query: { library: item.libraryId, path: item.path, t: item.completed ? 0 : Math.floor(item.time) } })
 }
 function seriesLink(item) {
-  return { name: item.seriesKind === 'video' ? 'watch' : 'browse', query: { library: item.libraryId, path: item.seriesPath } }
+  if (item.seriesKind === 'video') return { name: 'watch', query: { library: item.libraryId, path: item.seriesPath } }
+  if (item.catalogPath) return { name: 'series', query: { library: item.libraryId, path: item.catalogPath } }
+  return { name: 'browse', query: { library: item.libraryId, path: item.seriesPath } }
 }
 function libraryDescription(source) {
   const catalog = catalogs.value[source.id]
@@ -159,7 +162,7 @@ async function removeRecord(item) {
         <div class="section-heading"><h2 id="continue-title">继续观看<span v-if="unfinished.length" class="section-count">{{ unfinished.length }}</span></h2><router-link class="section-link" :to="{ hash: '#watch-history' }">观看历史<Icon name="chevron-right" :size="14" /></router-link></div>
         <div v-if="continuing.length" class="continue-row">
           <button v-for="(item,index) in continuing" :key="recordKey(item)" class="continue-card" :class="{ latest: index === 0 }" :disabled="item.sourceUnavailable" @click="openRecord(item)" :title="item.seriesTitle + ' · ' + item.episodeLabel">
-            <div class="continue-cover"><Poster :name="item.seriesTitle" :poster="item.poster" :library="item.libraryId" wide /><div class="cover-shade" /><span v-if="index === 0" class="latest-badge">上次观看</span><span class="cover-play"><Icon name="play" :size="23" /></span><span class="remaining">还剩 {{ fmtTime(Math.max(0, item.duration - item.time)) }}</span><span class="continue-progress"><span :style="{ width: item.percent + '%' }" /></span></div>
+            <div class="continue-cover"><Poster :name="item.seriesTitle" :src="item.cover" :poster="item.poster" :library="item.libraryId" wide /><div class="cover-shade" /><span v-if="index === 0" class="latest-badge">上次观看</span><span class="cover-play"><Icon name="play" :size="23" /></span><span class="remaining">还剩 {{ fmtTime(Math.max(0, item.duration - item.time)) }}</span><span class="continue-progress"><span :style="{ width: item.percent + '%' }" /></span></div>
             <div class="continue-meta"><strong>{{ prettyTitle(item.seriesTitle) }}</strong><span class="continue-episode">{{ item.episodeLabel }}<small>{{ item.sourceName }}<template v-if="item.sourceStatus"> · {{ item.sourceStatus }}</template></small></span></div>
           </button>
         </div>
@@ -170,7 +173,7 @@ async function removeRecord(item) {
         <div class="section-heading"><h2 id="recent-series-title">最近看的番剧</h2></div>
         <div class="recent-series-row">
           <router-link v-for="item in recentSeries" :key="item.libraryId + ':' + item.seriesPath" :to="seriesLink(item)" class="series-card" :title="item.seriesTitle">
-            <div class="series-cover"><Poster :name="item.seriesTitle" :poster="item.poster" :library="item.libraryId" /><span v-if="libraries.length > 1 || item.sourceStatus" class="source-badge">{{ item.sourceName }}<template v-if="item.sourceStatus"> · {{ item.sourceStatus }}</template></span><span class="series-hover"><Icon name="arrow-up-right" :size="23" /></span></div>
+            <div class="series-cover"><Poster :name="item.seriesTitle" :src="item.cover" :poster="item.poster" :library="item.libraryId" /><span v-if="libraries.length > 1 || item.sourceStatus" class="source-badge">{{ item.sourceName }}<template v-if="item.sourceStatus"> · {{ item.sourceStatus }}</template></span><span class="series-hover"><Icon name="arrow-up-right" :size="23" /></span></div>
             <strong>{{ prettyTitle(item.seriesTitle) }}</strong><span class="series-episode">{{ item.episodeLabel }}</span><small>{{ watchedAt(item.at) }}</small>
           </router-link>
         </div>
@@ -183,7 +186,7 @@ async function removeRecord(item) {
         <div v-if="!historyGroups.length" class="section-empty"><Icon name="clock" :size="18" /><span>没有符合条件的观看记录</span></div>
         <div v-for="group in historyGroups" :key="group.label" class="history-group"><h3>{{ group.label }}</h3><div class="history-list">
           <div v-for="item in group.items" :key="recordKey(item)" class="history-row">
-            <button class="history-main" :disabled="item.sourceUnavailable" @click="openRecord(item)" :title="item.sourceName + ' · ' + item.seriesTitle + ' · ' + item.episodeLabel"><div class="history-thumb"><Poster :name="item.seriesTitle" :poster="item.poster" :library="item.libraryId" wide /><span><Icon name="play" :size="15" /></span></div><span class="history-copy"><strong>{{ prettyTitle(item.seriesTitle) }}</strong><small><span v-if="libraries.length > 1 || item.sourceStatus" class="history-mobile-source">{{ item.sourceName }} · </span>{{ item.episodeLabel }}<template v-if="item.sourceStatus"> · {{ item.sourceStatus }}</template></small></span></button>
+            <button class="history-main" :disabled="item.sourceUnavailable" @click="openRecord(item)" :title="item.sourceName + ' · ' + item.seriesTitle + ' · ' + item.episodeLabel"><div class="history-thumb"><Poster :name="item.seriesTitle" :src="item.cover" :poster="item.poster" :library="item.libraryId" wide /><span><Icon name="play" :size="15" /></span></div><span class="history-copy"><strong>{{ prettyTitle(item.seriesTitle) }}</strong><small><span v-if="libraries.length > 1 || item.sourceStatus" class="history-mobile-source">{{ item.sourceName }} · </span>{{ item.episodeLabel }}<template v-if="item.sourceStatus"> · {{ item.sourceStatus }}</template></small></span></button>
             <span class="history-source">{{ item.sourceName }}<template v-if="item.sourceStatus"> · {{ item.sourceStatus }}</template></span><span class="history-progress" :class="{ completed: item.completed }"><Icon v-if="item.completed" name="check" :size="13" /><span>{{ item.completed ? '已看完' : fmtTime(item.time) + ' / ' + fmtTime(item.duration) }}</span></span><time class="history-time" :datetime="new Date(item.at).toISOString()">{{ watchedAt(item.at) }}</time><button class="delete-record" :disabled="removingKey === recordKey(item)" @click="removeRecord(item)" :aria-label="'删除观看记录：' + item.sourceName + ' · ' + item.seriesTitle + ' ' + item.episodeLabel" title="删除这条记录"><Icon name="close" :size="15" /></button>
           </div>
         </div></div>
