@@ -3,10 +3,12 @@ import { config } from '../config.ts'
 import { HttpError } from '../errors.ts'
 import {
   resolveVirtual, assertFile, listDirectory, findPoster, findSubtitlesFor, fallbackSubtitles,
-  toVirtual, extOf, IMAGE_SUB_EXTS, fileResource, readTextFile,
+  toVirtual, extOf, IMAGE_SUB_EXTS, fileResource,
 } from '../model/media.model.ts'
-import { probe, subtitleToVtt, hasFFmpeg } from './ffmpeg.service.ts'
+import { probe, hasFFmpeg } from './ffmpeg.service.ts'
+import { createSubtitleService } from './subtitle.service.ts'
 import type { MediaProbe, MediaProbeSubtitle } from './ffmpeg.service.ts'
+import type { SubtitleService, SubtitleStream } from './subtitle.service.ts'
 import type { FileResource, MediaEntry } from '../model/media.model.ts'
 import type { AppConfig, Library } from '../types.ts'
 
@@ -66,7 +68,7 @@ export interface MediaService {
   file(virtualPath: string, libraryId?: string): FileResource
   video(virtualPath: string, libraryId?: string): Promise<VideoPayload>
   externalSubtitle(virtualPath: string, libraryId?: string): Promise<string>
-  embeddedSubtitle(virtualPath: string, index: number, libraryId?: string): Promise<string>
+  openEmbeddedSubtitle(virtualPath: string, index: number, libraryId?: string): Promise<SubtitleStream>
 }
 
 function detectLanguage(name: string): string {
@@ -79,13 +81,10 @@ function detectLanguage(name: string): string {
   return ''
 }
 
-function toWebVtt(text: string, extension: string): string {
-  const normalized = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n')
-  if (/^\s*WEBVTT/.test(normalized)) return normalized
-  return 'WEBVTT\n\n' + (extension === '.srt' ? normalized.replace(/^\s*\d+\s*$/gm, '') : normalized)
-}
-
-export function createMediaService(settings: AppConfig = config): MediaService {
+export function createMediaService(
+  settings: AppConfig = config,
+  subtitles: SubtitleService = createSubtitleService({ dataDir: settings.dataDir }),
+): MediaService {
   const libraryFor = (id?: string): Library => settings.getLibrary(id || settings.defaultLibraryId)
   return {
     file(virtualPath: string, libraryId?: string): FileResource {
@@ -146,22 +145,14 @@ export function createMediaService(settings: AppConfig = config): MediaService {
       await assertFile(absolutePath)
       const extension = extOf(absolutePath)
       if (IMAGE_SUB_EXTS.has(extension)) throw new HttpError(415, '图形字幕（sup/sub/idx）无法以文本形式外挂')
-      const conversion = hasFFmpeg() ? await subtitleToVtt(absolutePath, null) : null
-      let text: string | null = conversion?.vtt ?? null
-      if (!text) {
-        const raw = await readTextFile(absolutePath).catch(() => null)
-        if (raw === null) throw new HttpError(415, '无法读取字幕')
-        text = toWebVtt(raw, extension)
-      }
-      return text
+      return subtitles.externalVtt(absolutePath, extension)
     },
-    async embeddedSubtitle(virtualPath: string, index: number, libraryId?: string): Promise<string> {
-      if (!Number.isInteger(index) || index < 0) throw new HttpError(400, 'index 无效')
+    async openEmbeddedSubtitle(virtualPath: string, index: number, libraryId?: string): Promise<SubtitleStream> {
+      // 先解析路径/媒体库，未知库等错误优先返回 404，再校验字幕流序号。
       const absolutePath = resolveVirtual(virtualPath, libraryFor(libraryId).id)
       await assertFile(absolutePath)
-      const result = await subtitleToVtt(absolutePath, index)
-      if (!result.vtt) throw new HttpError(500, result.error || '字幕提取失败')
-      return result.vtt
+      if (!Number.isInteger(index) || index < 0) throw new HttpError(400, 'index 无效')
+      return subtitles.openEmbedded(absolutePath, index)
     },
   }
 }

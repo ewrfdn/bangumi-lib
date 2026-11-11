@@ -242,3 +242,59 @@ test('tool-enabled runs execute declared tools and feed results back before answ
   assert.ok(JSON.stringify(secondBody.tools).includes('list_folder'))
   assert.ok(JSON.stringify(secondBody.messages).includes('call-1'))
 })
+
+test('conversation history is replayed as real turns, and deltas plus tool activity stream to the caller', async () => {
+  const bodies = []
+  await withServer((request, response, body) => {
+    bodies.push(body)
+    if (bodies.length === 1) {
+      response.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      event(response, { id: 'chat-history-tool', object: 'chat.completion.chunk', created: 1, model: body.model,
+        choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call-history', type: 'function', function: { name: 'list_folder', arguments: '{"path":""}' } }] }, finish_reason: null }] })
+      event(response, { id: 'chat-history-tool', object: 'chat.completion.chunk', created: 1, model: body.model,
+        choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })
+      response.end('data: [DONE]\n\n')
+      return
+    }
+    completion(response)
+  }, async (origin) => {
+    const events = []
+    const tools = [{
+      name: 'list_folder', label: '列出目录', description: '列出媒体库目录',
+      parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false },
+      async execute() { return { content: [{ type: 'text', text: '{"items":[]}' }], details: {} } },
+    }]
+    const result = await runPiAgentWithTools(configuration(`${origin}/v1`), {
+      prompt: '第二个问题', systemPrompt: '你是媒体库助手',
+      history: [{ role: 'user', content: '第一个问题' }, { role: 'assistant', content: '第一轮回答' }],
+      tools,
+      onEvent: (streamEvent) => events.push(streamEvent),
+    })
+    assert.equal(result.text, '整理完成')
+    assert.equal(events.filter((streamEvent) => streamEvent.type === 'delta').map((streamEvent) => streamEvent.text).join(''), '整理完成')
+    assert.deepEqual(events.filter((streamEvent) => streamEvent.type === 'tool_start').map((streamEvent) => streamEvent.name), ['list_folder'])
+    assert.deepEqual(events.filter((streamEvent) => streamEvent.type === 'tool_end').map((streamEvent) => [streamEvent.name, streamEvent.isError]), [['list_folder', false]])
+  })
+  const messages = bodies[0].messages
+  assert.deepEqual(messages.map((message) => message.role), ['system', 'user', 'assistant', 'user'])
+  assert.equal(messages[1].content, '第一个问题')
+  assert.ok(JSON.stringify(messages[2]).includes('第一轮回答'))
+  assert.ok(JSON.stringify(messages[3]).includes('第二个问题'))
+})
+
+test('invalid or oversized history is rejected before any upstream request', async () => {
+  let requests = 0
+  await withServer((request, response) => {
+    requests += 1
+    completion(response)
+  }, async (origin) => {
+    const base = configuration(`${origin}/v1`)
+    const oversized = Array.from({ length: 41 }, (_value, index) => ({
+      role: index % 2 === 0 ? 'user' : 'assistant', content: `turn-${index}`,
+    }))
+    await assert.rejects(runPiAgentWithTools(base, { prompt: '继续', systemPrompt: '你是助手', history: oversized }), { code: 'PI_HISTORY_INVALID', statusCode: 400 })
+    await assert.rejects(runPiAgentWithTools(base, { prompt: '继续', systemPrompt: '你是助手',
+      history: [{ role: 'assistant', content: 'y'.repeat(8001) }] }), { code: 'PI_HISTORY_INVALID', statusCode: 400 })
+  })
+  assert.equal(requests, 0)
+})

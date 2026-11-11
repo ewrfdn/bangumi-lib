@@ -22,7 +22,13 @@ export default async function registerRoutes(app: FastifyInstance, { services, s
   registerMediaController(app, { mediaService: services.media })
   registerPlaybackController(app, { playbackService: services.playback })
   registerProgressController(app, { progressService: services.progress })
-  registerAiController(app, { aiSettingsService: services.aiSettings, agentService: services.agent, authService: services.auth })
+  registerAiController(app, {
+    aiSettingsService: services.aiSettings,
+    agentService: services.agent,
+    authService: services.auth,
+    searchSettingsService: services.searchSettings,
+    searchService: services.search,
+  })
   registerCatalogController(app, { catalogService: services.catalog })
   registerLocalMediaController(app, { localMediaService: services.localMedia })
   registerLocalMediaVideoController(app, { localMediaVideoService: services.localMediaVideo })

@@ -37,6 +37,7 @@ interface FfprobeStream {
   channels?: number
   avg_frame_rate?: string
   r_frame_rate?: string
+  nb_frames?: string | number
   color_transfer?: string
   color_primaries?: string
   disposition?: { attached_pic?: number }
@@ -63,6 +64,8 @@ export interface MediaProbeVideo {
   height: number
   pixFmt: string
   fps: number
+  /** 视频总帧数；来自 nb_frames，缺失时按时长 × 帧率估算。 */
+  frames?: number
   bitrate: number
   hdr: boolean
   colorTransfer: string
@@ -345,8 +348,8 @@ async function pickPipeline(): Promise<EncoderPipeline | null> {
   return null
 }
 
-/** 探测媒体信息（带内存缓存 + 慢速存储自适应） */
-export async function probe(absPath: string): Promise<MediaProbe | null> {
+/** 探测媒体信息（带内存缓存 + 慢速存储自适应）；扫描路径可传更短超时，避免损坏文件卡住。 */
+export async function probe(absPath: string, { timeoutMs = 120000 }: { timeoutMs?: number } = {}): Promise<MediaProbe | null> {
   const cached = state.probeCache.get(absPath)
   if (cached && Date.now() - cached.at < 1000 * 60 * 30) return cached.value
   const ffprobe = state.ffprobe
@@ -357,11 +360,11 @@ export async function probe(absPath: string): Promise<MediaProbe | null> {
     [
       '-v', 'error',
       '-show_entries',
-      'format=duration,size,bit_rate,format_name:stream=index,codec_type,codec_name,profile,width,height,bit_rate,pix_fmt,channels,tags:stream_tags=language,title,BPS-eng,DURATION',
+      'format=duration,size,bit_rate,format_name:stream=index,codec_type,codec_name,profile,width,height,bit_rate,pix_fmt,channels,avg_frame_rate,r_frame_rate,nb_frames,tags:stream_tags=language,title,BPS-eng,DURATION',
       '-of', 'json',
       absPath,
     ],
-    120000,
+    timeoutMs,
   )
   const elapsed = Date.now() - t0
   if (!ok) {
@@ -381,6 +384,47 @@ export async function probe(absPath: string): Promise<MediaProbe | null> {
   return value
 }
 
+export interface VideoCoverOptions {
+  /** 输出高度，保持原始宽高比；默认 480p。 */
+  height?: number
+}
+
+/** 截取视频中间帧为 JPEG 封面，返回是否写出成功。 */
+export async function extractVideoCover(absPath: string, target: string, { height = 480 }: VideoCoverOptions = {}): Promise<boolean> {
+  const ffmpeg = state.ffmpeg
+  if (!ffmpeg) return false
+  const info = await probe(absPath, { timeoutMs: 15_000 })
+  if (!info) return false
+  const duration = Number(info.duration) || 0
+  if (duration < 1) return false
+  // 正常取中间帧；损坏/索引异常的 MKV 可能无法定位中间关键帧，退到靠前位置再试一次。
+  const middle = Math.max(0.5, Math.min(duration / 2, duration - 0.5))
+  const fallback = Math.max(0.5, Math.min(duration * 0.1, duration - 0.5))
+  const seeks = [...new Set([middle, fallback].map((value) => Number(value.toFixed(3))))]
+  // 最后兜底不 seek：损坏的 MKV 索引可能让带 -ss 的读取卡死，但顺序解第一帧通常仍可用。
+  const attempts: Array<number | null> = [...seeks, null]
+  for (const seek of attempts) {
+    const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-threads', '1']
+    if (seek !== null) args.push('-ss', seek.toFixed(3))
+    args.push(
+      '-i', absPath,
+      '-frames:v', '1',
+      '-vf', `scale=-2:${Math.max(120, Math.trunc(height))}:flags=lanczos`,
+      '-q:v', '3',
+      '-y', target,
+    )
+    const result = await run(ffmpeg, args, 10_000)
+    if (!result.ok) {
+      await fs.promises.rm(target, { force: true }).catch(() => undefined)
+      continue
+    }
+    const stat = await fs.promises.stat(target).catch(() => null)
+    if (stat?.isFile() && stat.size > 0) return true
+    await fs.promises.rm(target, { force: true }).catch(() => undefined)
+  }
+  return false
+}
+
 function normalizeProbe(raw: FfprobeJson): MediaProbe {
   const streams = raw.streams || []
   const fmt = raw.format || {}
@@ -389,6 +433,7 @@ function normalizeProbe(raw: FfprobeJson): MediaProbe {
   const subStreams = streams.filter((s) => s.codec_type === 'subtitle')
   const fps = parseFps(video?.avg_frame_rate || video?.r_frame_rate)
   const duration = Number(fmt.duration) || 0
+  const frames = Math.max(0, Math.round(Number(video?.nb_frames) || duration * fps || 0))
   const codec = video?.codec_name || ''
   const pixFmt = video?.pix_fmt || ''
   const isHdr =
@@ -407,6 +452,7 @@ function normalizeProbe(raw: FfprobeJson): MediaProbe {
           height: video.height || 0,
           pixFmt,
           fps,
+          frames,
           bitrate: Number(video.bit_rate) || 0,
           hdr: isHdr,
           colorTransfer: video?.color_transfer || '',

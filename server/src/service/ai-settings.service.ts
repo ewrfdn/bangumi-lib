@@ -1,8 +1,8 @@
-import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto'
 import { createAiSettingsModel } from '../model/ai-settings.model.ts'
 import type { AiSettingsConfig, EncryptedApiKey, StoredAiSettings } from '../model/ai-settings.model.ts'
 import type { AniShareDatabase } from '../model/database.ts'
 import type { AiConfig, AppConfig } from '../types.ts'
+import { createSecretCipher } from './secret-cipher.ts'
 
 const formats = new Set(['openai-completions', 'openai-responses', 'anthropic-messages'])
 const defaults = { enabled: false, apiFormat: 'openai-completions', baseUrl: '', model: '', maxTokens: 2048, timeoutMs: 30000 }
@@ -19,6 +19,8 @@ export interface AiSettingsService {
   save(draft: unknown): AiPublicConfig
   draft(draft?: unknown): AiConfig
   effective(): AiConfig
+  /** 当前生效的模型密钥（不要求已启用/已配置完整）；供复用密钥的搜索配置读取。 */
+  apiKey(): string
 }
 
 /** 服务只需要这几项配置；便于测试注入最小依赖。 */
@@ -40,11 +42,6 @@ interface PreparedAiConfig {
 interface ValidateOptions {
   requireConfigured?: boolean
   allowIncomplete?: boolean
-}
-
-interface KeyCipher {
-  encrypt(secret: string): EncryptedApiKey
-  decrypt(encrypted: EncryptedApiKey | null | undefined): string
 }
 
 const fail = (status: number, message: string, code = 'AI_CONFIG_INVALID') => Object.assign(new Error(message), { status, code })
@@ -71,37 +68,13 @@ function validate(input: Record<string, unknown>, { requireConfigured = false, a
   return { enabled: input.enabled, apiFormat: input.apiFormat, baseUrl, model, maxTokens: input.maxTokens, timeoutMs: input.timeoutMs }
 }
 
-function createKeyCipher(loadKey: () => Buffer): KeyCipher {
-  return {
-    encrypt(secret: string): EncryptedApiKey {
-      const iv = randomBytes(12)
-      const cipher = createCipheriv('aes-256-gcm', loadKey(), iv)
-      cipher.setAAD(Buffer.from('anishare:ai-config:v1'))
-      const ciphertext = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()])
-      return { version: 1, iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), ciphertext: ciphertext.toString('base64') }
-    },
-    decrypt(encrypted: EncryptedApiKey | null | undefined): string {
-      if (!encrypted) return ''
-      const key = loadKey()
-      try {
-        if (encrypted.version !== 1) throw new Error('invalid version')
-        const iv = Buffer.from(encrypted.iv, 'base64')
-        const tag = Buffer.from(encrypted.tag, 'base64')
-        if (iv.length !== 12 || tag.length !== 16 || typeof encrypted.ciphertext !== 'string' || encrypted.ciphertext.length > 32768) throw new Error('invalid envelope')
-        const decipher = createDecipheriv('aes-256-gcm', key, iv)
-        decipher.setAAD(Buffer.from('anishare:ai-config:v1'))
-        decipher.setAuthTag(tag)
-        return Buffer.concat([decipher.update(Buffer.from(encrypted.ciphertext, 'base64')), decipher.final()]).toString('utf8')
-      } catch {
-        throw fail(503, 'AI 配置解密失败，请检查 AI_CONFIG_KEY 或数据目录中的 ai-config.key', 'AI_CONFIG_DECRYPTION_FAILED')
-      }
-    },
-  }
-}
-
 export function createAiSettingsService(database: AniShareDatabase, settings: AiSettingsSource): AiSettingsService {
   const storage = createAiSettingsModel(database, settings)
-  const cipher = createKeyCipher(() => storage.encryptionKey())
+  const cipher = createSecretCipher(() => storage.encryptionKey(), {
+    aad: 'anishare:ai-config:v1',
+    decryptErrorMessage: 'AI 配置解密失败，请检查 AI_CONFIG_KEY 或数据目录中的 ai-config.key',
+    decryptErrorCode: 'AI_CONFIG_DECRYPTION_FAILED',
+  })
   const initial: AiConfig = { ...defaults, ...settings.aiDefaults }
   const current = (): AiSettingsState => {
     const stored = storage.read()
@@ -147,6 +120,9 @@ export function createAiSettingsService(database: AniShareDatabase, settings: Ai
       const state = current()
       if (!state.config.enabled) throw fail(409, 'AI Agent 尚未启用，请先在后台管理「模型服务」中开启', 'AI_DISABLED')
       return { ...validate(state.config, { requireConfigured: true }), apiKey: keyOf(state) }
+    },
+    apiKey(): string {
+      return keyOf(current())
     },
   }
 }

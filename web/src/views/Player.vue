@@ -5,6 +5,8 @@ import Hls from 'hlsjs'
 import Artplayer from 'artplayer'
 import { api, codecLabel, fmtSize, fmtTime, langLabel, parseEpisode, prettyTitle } from '../api'
 import { getProgress, saveProgress } from '../progress'
+import { useGamepad, useGamepadContext } from '../gamepad/useGamepad.js'
+import PlayerPad from '../gamepad/PlayerPad.vue'
 
 const props = defineProps({
   path: { type: String, default: '' },
@@ -12,6 +14,7 @@ const props = defineProps({
   t: { type: Number, default: 0 },
 })
 const router = useRouter()
+const { gamepad, openOverlay, closeOverlay } = useGamepad()
 
 const loading = ref(true)
 const error = ref('')
@@ -52,6 +55,39 @@ const v = computed(() => info.value?.probe?.video)
 const playKey = computed(() => info.value?.playKey || props.path)
 const activeLibrary = computed(() => info.value?.libraryId || props.library)
 const watchTarget = (path) => ({ name: 'watch', query: { path, library: activeLibrary.value } })
+
+/* ---------------- 手柄（Gamepad） ---------------- */
+const subtitleIndex = ref(0) // 0 = 关闭字幕，其余对应 subtitleTracks 下标
+const playbackRate = ref(1)
+const volume = ref(0.9)
+const playing = ref(false)
+const padMenuOpen = computed(() => gamepad.overlay?.kind === 'player')
+const subtitleTracks = computed(() => {
+  const tracks = [{ id: 'off', label: '关闭字幕', url: '' }]
+  for (const [index, sub] of subs.value.entries()) {
+    if (sub.image) continue
+    const label = `外挂 · ${langLabel(sub.lang) || sub.ext.slice(1).toUpperCase()}${sub.name.includes('chs') ? ' 简体' : ''}`
+    tracks.push({ id: `ext-${index}`, label, url: api.subtitleUrl(sub.path, activeLibrary.value) })
+  }
+  for (const [index, stream] of streams.value.entries()) {
+    const label = `内挂 · ${langLabel(stream.language) || codecLabel(stream.codec)}${stream.title ? ' ' + stream.title : ''}`
+    tracks.push({ id: `emb-${index}`, label, url: embeddedSubtitleUrl(stream) })
+  }
+  return tracks
+})
+const padSubtitles = computed(() => subtitleTracks.value.map((track, index) => ({ id: track.id, label: track.label, active: index === subtitleIndex.value })))
+const padEpisodes = computed(() => episodes.value.map((item, index) => {
+  const number = parseEpisode(item.name).episode || index + 1
+  return { path: item.path, name: prettyTitle(item.name), number: String(number).padStart(2, '0'), current: Boolean(item.current) }
+}))
+const padLinks = computed(() => {
+  if (!info.value) return []
+  const links = []
+  if (info.value.dir) links.push({ label: '返回番剧目录', to: { name: 'browse', query: { path: info.value.dir, library: activeLibrary.value } } })
+  links.push({ label: '媒体库', to: { name: 'library', query: { library: activeLibrary.value } } })
+  links.push({ label: '首页', to: { name: 'home' } })
+  return links
+})
 
 /* ---------------- 播放进度 ---------------- */
 let lastSaved = 0
@@ -405,7 +441,7 @@ function addSettings(artplayer) {
   for (const s of streams.value) {
     list.push({
       html: escapeHtml(`内挂 · ${langLabel(s.language) || codecLabel(s.codec)}${s.title ? ' ' + s.title : ''}`),
-      url: api.streamSubtitleUrl(props.path, s.index, activeLibrary.value),
+      url: embeddedSubtitleUrl(s),
       type: 'vtt',
     })
   }
@@ -417,11 +453,9 @@ function addSettings(artplayer) {
         ...list.map((s, i) => ({ html: s.html, url: s.url, value: 'sub' + i })),
       ],
       onSelect(item) {
-        if (!item.value) {
-          artplayer.subtitle.switch('')
-          return item.html
-        }
-        artplayer.subtitle.switch(item.url, { name: item.html })
+        const selected = list.findIndex((entry) => entry.url === item.url)
+        switchSubtitle(artplayer, selected >= 0 ? list[selected] : null)
+        subtitleIndex.value = item.value && selected >= 0 ? selected + 1 : 0
         return item.html
       },
     })
@@ -477,10 +511,12 @@ function bindEvents(artplayer) {
   artplayer.on('video:playing', () => {
     busy.value = ''
     hasStarted.value = true
+    playing.value = true
     userPaused = false
     bufferPaused = false
   })
   artplayer.on('video:pause', () => {
+    playing.value = false
     if (!bufferPaused && !recovering) userPaused = true
     rememberProgress()
   })
@@ -494,16 +530,257 @@ function bindEvents(artplayer) {
     }
   })
   artplayer.on('video:ended', () => {
+    playing.value = false
     rememberProgress()
     if (nextEp.value) router.replace(watchTarget(nextEp.value.path))
   })
+  artplayer.on('video:ratechange', () => { playbackRate.value = Number(artplayer.video.playbackRate) || 1 })
+  artplayer.on('video:volumechange', () => { volume.value = Number(artplayer.video.volume) || 0 })
 }
+
+/* ---------------- 手柄控制（媒体控制模式 + 播放设置浮层） ---------------- */
+
+/** 焦点不在页面控件上时（刚进入播放器 / 从浮层返回），方向键作为媒体控制 */
+function padControlsActive() {
+  const active = document.activeElement
+  if (!active || active === document.body) return true
+  return Boolean(playerEl.value && (active === playerEl.value || playerEl.value.contains(active)))
+}
+
+function syncPadState(target = art.value) {
+  if (!target) return
+  try { volume.value = Number(target.volume) || 0 } catch {}
+  try { playbackRate.value = Number(target.playbackRate) || 1 } catch {}
+  playing.value = !target.video?.paused
+}
+
+function padTogglePlay() {
+  const target = art.value
+  if (!target) return
+  if (target.video.paused) target.play().catch(() => {})
+  else target.pause()
+}
+
+/** 手柄快进/快退：走与进度条拖动相同的用户 seek 通道，兼容转码流换会话 */
+function padSeek(delta) {
+  const target = art.value
+  if (!target || !info.value) {
+    if (info.value) notice.value = '视频还在准备中，请稍候…'
+    return
+  }
+  // 媒体尚未就绪时不要 seek：转码会话启动期间连续 seek 会反复重建会话
+  const readyToSeek = mode.value === 'direct' ? target.video.readyState >= 1 : (hlsReady.value && target.video.readyState >= 1)
+  if (!readyToSeek) {
+    notice.value = '视频还在准备中，请稍候…'
+    return
+  }
+  const duration = Number(info.value.duration) || (Number.isFinite(target.video.duration) ? target.video.duration : 0)
+  const from = target.video.currentTime
+  const to = Math.max(0, Math.min(from + delta, duration > 0 ? duration - 1 : from + delta))
+  if (Math.abs(to - from) < 0.05) return
+  notice.value = ''
+  userSeek = true
+  userSeekNote = from
+  seekTarget = to
+  clearTimeout(markUserSeek.t)
+  markUserSeek.t = setTimeout(() => (userSeek = false), 800)
+  try { target.seek = to } catch { target.video.currentTime = to }
+  target.notice.show = `${delta > 0 ? '快进' : '快退'} ${Math.abs(Math.round(to - from))} 秒`
+}
+
+function padNudgeVolume(delta) {
+  const target = art.value
+  if (!target) return
+  const next = Math.min(1, Math.max(0, (Number(target.volume) || 0) + delta))
+  target.volume = next
+  volume.value = next
+  target.notice.show = `音量 ${Math.round(next * 100)}%`
+}
+
+/** 浮层里「音量 −/+」给出的是绝对值 */
+function padSetVolume(value) {
+  const target = art.value
+  const next = Math.min(1, Math.max(0, Number(value) || 0))
+  if (target) {
+    target.volume = next
+    target.notice.show = `音量 ${Math.round(next * 100)}%`
+  }
+  volume.value = next
+}
+
+/** 内挂字幕地址：优先用后端确认过的规范路径，避免路由里路径编码不一致。 */
+function embeddedSubtitleUrl(stream) {
+  return api.streamSubtitleUrl(info.value?.path || props.path, stream.index, activeLibrary.value)
+}
+
+/**
+ * 关闭字幕：停用并移除 artplayer 当前的字幕 <track>，再补回一个已挂载的占位 track。
+ * artplayer 的 createTrack() 会先 remove(template.$track)，占位元素必须始终挂在 video 上，
+ * 否则「关闭后再选字幕」会在 removeChild 处抛错，新 track 不会被创建、也不发字幕请求。
+ */
+function removeSubtitleTrack(artplayer) {
+  const template = artplayer?.template
+  if (!template) return
+  const track = template.$track
+  if (track) {
+    try { if (track.track) track.track.mode = 'disabled' } catch {}
+    try { track.remove() } catch {}
+  }
+  if (template.$video) {
+    const placeholder = document.createElement('track')
+    template.$video.appendChild(placeholder)
+    template.$track = placeholder
+  }
+  if (template?.$subtitle) template.$subtitle.innerHTML = ''
+  if (artplayer?.subtitle) artplayer.subtitle.option = { ...(artplayer.option.subtitle || {}), url: '' }
+}
+
+/**
+ * 字幕统一入口（设置菜单 / 手柄共用）。
+ * 不用 artplayer.subtitle.switch：它会先 fetch 完整 VTT 再创建 track，
+ * 而内挂字幕首次提取要顺序读整个视频（慢速存储上 1-3 分钟），必须让原生 <track>
+ * 直接连服务端，边提取边解析显示。
+ */
+function switchSubtitle(artplayer, track) {
+  if (!artplayer) return
+  if (!track || !track.url) {
+    removeSubtitleTrack(artplayer)
+    return
+  }
+  const subtitleStyle = artplayer.option?.subtitle?.style
+  if (subtitleStyle) artplayer.subtitle.style(subtitleStyle)
+  artplayer.subtitle.createTrack('metadata', track.url)
+  const trackEl = artplayer.template?.$track
+  if (trackEl) trackEl.addEventListener('error', () => { artplayer.notice.show = '字幕加载失败' }, { once: true })
+  artplayer.notice.show = '字幕加载中…'
+}
+
+function applySubtitle(index) {
+  const track = subtitleTracks.value[index]
+  if (!art.value) return
+  subtitleIndex.value = index
+  switchSubtitle(art.value, track)
+  art.value.notice.show = track?.url ? `字幕：${track.label}（加载中…）` : '字幕：关闭'
+}
+
+function padCycleSubtitle() {
+  if (subtitleTracks.value.length <= 1) {
+    if (art.value) art.value.notice.show = '没有可用字幕'
+    return
+  }
+  applySubtitle((subtitleIndex.value + 1) % subtitleTracks.value.length)
+}
+
+function padSelectSubtitle(id) {
+  const index = subtitleTracks.value.findIndex((track) => track.id === id)
+  if (index >= 0) applySubtitle(index)
+}
+
+function padSetRate(rate) {
+  const target = art.value
+  const next = Math.min(2, Math.max(0.5, Number(rate) || 1))
+  if (target) target.playbackRate = next
+  playbackRate.value = next
+  if (target) target.notice.show = `播放速度 ${next}×`
+}
+
+function padSelectEpisode(path) {
+  if (!path) return
+  closeOverlay()
+  router.replace(watchTarget(path))
+}
+
+function padPrevEpisode() {
+  if (prevEp.value) router.replace(watchTarget(prevEp.value.path))
+}
+
+function padNextEpisode() {
+  if (nextEp.value) router.replace(watchTarget(nextEp.value.path))
+}
+
+function padToggleFullscreen() {
+  const target = art.value
+  if (!target) return
+  const nativeActive = Boolean(target.fullscreen) || Boolean(typeof document !== 'undefined' && document.fullscreenElement)
+  const webActive = Boolean(target.fullscreenWeb)
+  if (nativeActive || webActive) {
+    // 退出：原生全屏和网页全屏都清掉，避免状态不一致
+    if (nativeActive) {
+      try { target.fullscreen = false } catch { try { document.exitFullscreen?.() } catch { /* ignore */ } }
+    }
+    if (webActive) {
+      try { target.fullscreenWeb = false } catch { /* ignore */ }
+    }
+    return
+  }
+  // 手柄按键不是浏览器用户手势，原生 requestFullscreen 可能被拒绝；
+  // 先尝试原生全屏，短时间内没生效就退化为网页全屏（CSS 铺满，不需要用户手势）。
+  try { target.fullscreen = true } catch { /* fall through */ }
+  if (typeof window !== 'undefined') {
+    window.setTimeout(() => {
+      if (art.value !== target || target.fullscreen) return
+      try { target.fullscreenWeb = true } catch { /* ignore */ }
+      try { target.notice.show = '浏览器限制直接全屏，已切换为网页全屏' } catch { /* ignore */ }
+    }, 350)
+  }
+}
+
+function openPadMenu() {
+  if (!info.value) return
+  // 原生全屏时页面内浮层不可见，先退出全屏
+  if (typeof document !== 'undefined' && document.fullscreenElement) document.exitFullscreen?.().catch(() => {})
+  try { if (art.value?.fullscreen) art.value.fullscreen = false } catch {}
+  try { if (art.value?.fullscreenWeb) art.value.fullscreenWeb = false } catch {}
+  syncPadState()
+  openOverlay({ kind: 'player' })
+}
+
+useGamepadContext({
+  id: 'player',
+  keepFocusless: true, // 播放器默认使用「媒体控制模式」，不自动聚焦页面元素
+  hints: {
+    confirm: '播放 / 暂停',
+    context: '切换字幕',
+    fullscreen: '全屏 / 退出全屏',
+    menu: '播放设置',
+    'prev-tab': '上一集',
+    'next-tab': '下一集',
+    up: '音量 +',
+    down: '音量 −',
+    left: '快退',
+    right: '快进',
+  },
+  handle(action, meta) {
+    if (gamepad.overlay) return false
+    if (action === 'menu') { openPadMenu(); return true }
+    if (action === 'fullscreen') { padToggleFullscreen(); return true }
+    if (action === 'prev-tab') {
+      if (!prevEp.value) return false
+      padPrevEpisode()
+      return true
+    }
+    if (action === 'next-tab') {
+      if (!nextEp.value) return false
+      padNextEpisode()
+      return true
+    }
+    if (!padControlsActive()) return false
+    if (action === 'confirm') { padTogglePlay(); return true }
+    if (action === 'left') { padSeek(meta?.repeat ? -30 : -10); return true }
+    if (action === 'right') { padSeek(meta?.repeat ? 30 : 10); return true }
+    if (action === 'up') { padNudgeVolume(0.05); return true }
+    if (action === 'down') { padNudgeVolume(-0.05); return true }
+    if (action === 'context') { padCycleSubtitle(); return true }
+    return false
+  },
+})
 
 async function setupDirect(startAt) {
   const version = generation
   mode.value = 'direct'
   const a = new Artplayer(baseOptions({ url: api.streamUrl(props.path, activeLibrary.value), type: detectType(info.value?.name) }))
   art.value = a
+  syncPadState(a)
   addSettings(a)
   bindEvents(a)
   let fallenBack = false
@@ -549,6 +826,7 @@ async function setupTranscode(startAt, version = generation) {
     }),
   )
   art.value = a
+  syncPadState(a)
   addSettings(a)
   bindEvents(a)
   loading.value = false
@@ -610,6 +888,7 @@ onMounted(() => {
 })
 watch(() => [props.path, props.library], load)
 onBeforeUnmount(() => {
+  if (gamepad.overlay?.kind === 'player') closeOverlay()
   rememberProgress({ keepalive: true })
   disposed = true
   generation++
@@ -660,6 +939,7 @@ function back() {
           </div>
           <div class="screen-toolbar">
             <div class="playback-state"><span class="state-dot"/><span>{{ loading ? '准备中' : mode === 'direct' ? '原画播放' : '兼容播放' }}</span><span v-if="v?.height" class="quality-label">{{ v.height >= 2160 ? '4K' : `${v.height}P` }}</span></div>
+            <button class="screen-menu-button" @click="openPadMenu" title="播放设置（手柄 Y）"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="18" r="2"/></svg>播放设置</button>
             <button class="theater-button" :aria-pressed="theater" @click="theater = !theater" :title="theater ? '退出剧场模式' : '剧场模式'"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h10v6H7z"/></svg>{{ theater ? '常规视图' : '剧场模式' }}</button>
           </div>
 
@@ -686,6 +966,7 @@ function back() {
             </div>
           </details>
           <p class="keyboard-hint"><kbd>Space</kbd> 播放 / 暂停 <span>·</span><kbd>←</kbd><kbd>→</kbd> 快退 / 快进 <span>·</span><kbd>F</kbd> 全屏</p>
+          <p class="keyboard-hint gamepad-hint"><kbd>手柄</kbd> A 播放 / 暂停 <span>·</span><kbd>←</kbd><kbd>→</kbd> 快退 / 快进 <span>·</span><kbd>↑</kbd><kbd>↓</kbd> 音量 <span>·</span><kbd>Y</kbd> 播放设置 <span>·</span><kbd>B</kbd> 返回</p>
         </section>
 
         <aside class="episodes-panel" aria-label="剧集列表">
@@ -706,6 +987,30 @@ function back() {
         </aside>
       </div>
     </main>
+
+    <PlayerPad
+      v-if="padMenuOpen"
+      :title="title"
+      :episodes="padEpisodes"
+      :episode-total="episodes.length"
+      :current-index="currentIndex"
+      :subtitles="padSubtitles"
+      :rate="playbackRate"
+      :volume="volume"
+      :playing="playing"
+      :has-prev="Boolean(prevEp)"
+      :has-next="Boolean(nextEp)"
+      :links="padLinks"
+      @close="closeOverlay"
+      @play-pause="padTogglePlay"
+      @prev="padPrevEpisode"
+      @next="padNextEpisode"
+      @select-episode="padSelectEpisode"
+      @select-subtitle="padSelectSubtitle"
+      @set-rate="padSetRate"
+      @set-volume="padSetVolume"
+      @toggle-fullscreen="padToggleFullscreen"
+    />
   </div>
 </template>
 
@@ -736,6 +1041,8 @@ function back() {
 .quality-label { margin-left: 4px; font-size: 9px; color: #b9b9c2; border: 1px solid #ffffff15; border-radius: 3px; padding: 1px 5px; }
 .theater-button { display: flex; align-items: center; gap: 6px; border: 0; background: none; color: #9999a3; font-size: 11px; padding: 5px 0 5px 10px; }
 .theater-button:hover { color: #ededf1; }
+.screen-menu-button { display: flex; align-items: center; gap: 6px; border: 0; background: none; color: #9999a3; font-size: 11px; padding: 5px 10px 5px 0; margin-left: auto; }
+.screen-menu-button:hover { color: #c9b7fb; }
 .watch-title-block { padding: 18px 0; }
 h1 { font-size: clamp(18px, 1.7vw, 23px); font-weight: 550; line-height: 1.5; margin: 0 0 8px; overflow-wrap: anywhere; }
 .title-meta { display: flex; align-items: center; flex-wrap: wrap; color: #85858f; font-size: 11px; }
@@ -767,6 +1074,7 @@ h1 { font-size: clamp(18px, 1.7vw, 23px); font-weight: 550; line-height: 1.5; ma
 .subtitle-tracks p { font-size: 11px; color: #85858f; margin: 0; }
 .keyboard-hint { display: flex; align-items: center; justify-content: center; gap: 6px; color: #64646e; font-size: 10px; margin: 15px 0 0; }
 .keyboard-hint > span { padding: 0 5px; }
+.gamepad-hint { margin-top: 7px; color: #7d6b9a; }
 kbd { font-family: inherit; font-size: 9px; color: #85858f; border: 1px solid #ffffff12; padding: 1px 4px; border-radius: 3px; }
 .episodes-panel { min-width: 0; padding: 17px 0 0; border: 1px solid #ffffff0e; border-radius: 8px; background: #101013; overflow: hidden; }
 .episodes-heading { padding: 0 16px; display: flex; align-items: center; justify-content: space-between; color: #64646e; }
@@ -813,9 +1121,9 @@ button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px soli
 .player-page .art-video-player .art-progress .art-progress-indicator { background: #d3c5f4; box-shadow: 0 0 0 4px #a78bfa15; }
 .player-page .art-video-player .art-setting-panel { background: #141417f5; backdrop-filter: blur(16px); border-radius: 8px; border: 1px solid #ffffff14; color: #dedee5; }
 .player-page .art-video-player .art-setting-panel .art-setting-item:hover { background: #a78bfa0b; }
-.player-page .art-video-player .art-subtitle-box { bottom: 64px; text-shadow: 0 2px 4px #000, 0 0 3px #000; }
+.player-page .art-video-player .art-subtitle { bottom: 64px; text-shadow: 0 2px 4px #000, 0 0 3px #000; }
 .player-page .art-video-player .art-notice { background: #141417ee; border: 1px solid #ffffff14; border-radius: 5px; font-size: 12px; color: #c9c9d2; }
 .player-page .art-video-player .art-mask-show .art-state { border-radius: 50%; }
 .player-page .art-video-player .art-info { border-radius: 7px; background: #101013f0; }
-@media (max-width: 540px) { .player-page .art-video-player .art-bottom { padding: 0 8px 2px; } .player-page .art-video-player .art-subtitle-box { font-size: 18px !important; bottom: 48px; } }
+@media (max-width: 540px) { .player-page .art-video-player .art-bottom { padding: 0 8px 2px; } .player-page .art-video-player .art-subtitle { font-size: 18px !important; bottom: 48px; } }
 </style>

@@ -6,8 +6,8 @@
 不再单独建作品、季、集或下载任务表；v6 增加的 `lib_folder` 只是目录扫描状态，不承载影视资料。
 
 已实现建表迁移及对应 Model / Service / Controller，接口见 [影视库 API](catalog-api.md)。
-当前 v6 包含 5 张业务表、`lib_folder` 目录扫描表，另保留旧进度、登录和配置三张表，共 9 张；旧进度迁移完成后的目标为 8 张。
-[建表 SQL](../server/db/catalog-schema.sql) 是空数据库结构参考；已有数据库依次执行 [v4 建表](../server/db/migrations/004_catalog.sql)、[v5 数据源字段](../server/db/migrations/005_media_source.sql) 和 [v6 目录扫描](../server/db/migrations/006_lib_folder.sql)，不能整份重放参考 SQL。
+当前 v7 包含 5 张业务表、`lib_folder` 目录扫描表，另保留旧进度、登录和配置三张表，共 9 张；旧进度迁移完成后的目标为 8 张。
+[建表 SQL](../server/db/catalog-schema.sql) 是空数据库结构参考；已有数据库依次执行 [v4 建表](../server/db/migrations/004_catalog.sql)、[v5 数据源字段](../server/db/migrations/005_media_source.sql)、[v6 目录扫描](../server/db/migrations/006_lib_folder.sql) 和 [v7 视频源信息](../server/db/migrations/007_video_metadata.sql)，不能整份重放参考 SQL。
 本阶段新接口直接查询 SQLite；现有首页、播放和文件浏览接口继续沿用原逻辑，未自动扫描或导入影视数据。
 
 ## media：影视信息
@@ -58,13 +58,15 @@ Windows 路径按所在库规则统一大小写后计算 hash；路径统一 `/`
 | --- | --- |
 | `id` | 视频 ID |
 | `title` | 视频显示名称，默认文件名 |
-| `cover_path` | 视频封面路径，可空，空时使用影视封面 |
+| `cover_path` | 视频封面路径，可空；扫描时抽取中间帧生成 480p JPEG，保存为相对 `DATA_DIR` 的 `local-media/...`；空时回退影视封面 |
 | `media_id` | 对应影视 ID |
 | `video_index` | 播放顺序，允许 12.5 等编号 |
 | `media_path` | 相对于 `local_media.folder_path` 的视频路径 |
 | `local_media_id` | 对应目录 ID |
-| `video_type` | main=正片，extra=番外 |
+| `video_type` | main=正片，extra=番外；扫描时按 Bangumi `episode_count`、集号和特典目录/文件名自动归类，Agent 可用工具修正 |
 | `duration_ms` | 当前文件实际时长 |
+| `width / height` | 视频分辨率；扫描时由 ffprobe 写入，可空 |
+| `frame_count` | 视频总帧数；优先取 nb_frames，缺失时按时长 × 帧率估算 |
 | `size_bytes / mtime_ms` | 文件大小和修改时间，用于减少重复探测 |
 | `missing` | 是否缺失，缺失保留记录 |
 | `created_at / updated_at` | 创建与更新时间 |
@@ -98,7 +100,8 @@ Windows 路径按所在库规则统一大小写后计算 hash；路径统一 `/`
 
 字幕无需单独的持久化表：播放时按同目录、相同基础文件名匹配外挂，支持语言后缀。
 例如 `第01集.mkv` 对应 `第01集.ass`、`第01集.chs.ass`、`第01集.zh-CN.srt`。
-内封字幕由 ffprobe / 播放器按需探测和读取。音轨、编码信息也按需探测，不写入观看历史表。
+内封字幕由 ffprobe 探测、ffmpeg 按需提取；音轨、编码信息也按需探测，不写入观看历史表。
+提取出的 WebVTT 按「视频绝对路径 + 大小 + mtime + 字幕流序号」缓存在 `DATA_DIR/subtitles/`，属于可随时删除的派生数据，不进入 SQLite。首次提取边读边流式返回，文件变更后按新 key 重新提取。
 图形字幕仍按现有播放器 / 转码能力处理。
 
 ## lib_folder：目录扫描状态（v6）
@@ -159,5 +162,5 @@ erDiagram
 多个文件的旧记录映射到同一 `(media_id, video_index)` 时取最新 `at`，保留该记录的进度和时长。未匹配、离线库和已移除库的历史继续保留并兼容读取，不能直接丢弃旧表。
 历史和续播接口最终统一读取 `media_tracks`，确认全部迁移完成后才退出旧 `playback_progress`。
 
-启动逻辑已改为版本化迁移：保留旧数据后逐步升级到 v6，事务内完成各版本迁移后再标记版本；较新的数据库版本会被拒绝，不能降级写入。
+启动逻辑已改为版本化迁移：保留旧数据后逐步升级到 v7，事务内完成各版本迁移后再标记版本；较新的数据库版本会被拒绝，不能降级写入。
 所有连接启用 foreign_keys。CRUD、路径规范化、历史校验、任务流转放在 Service；SQL 在 Model；Controller 处理 HTTP 参数和响应。

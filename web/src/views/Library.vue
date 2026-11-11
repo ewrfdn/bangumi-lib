@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import Poster from '../components/Poster.vue'
 import Icon from '../components/Icon.vue'
 import { api, mediaCoverUrl, prettyTitle } from '../api'
+import { useGamepadContext } from '../gamepad/useGamepad.js'
 
 const props = defineProps({ library: { type: String, default: '' } })
 const router = useRouter()
@@ -54,6 +55,22 @@ async function load() {
 function selectLibrary(id) {
   router.replace({ name: 'library', query: { library: id } })
 }
+function shiftLibrary(step) {
+  if (!libraries.value.length) return
+  const index = libraries.value.findIndex(item => item.id === selectedId.value)
+  const next = libraries.value[(Math.max(0, index) + step + libraries.value.length) % libraries.value.length]
+  if (next && next.id !== selectedId.value) selectLibrary(next.id)
+}
+// 手柄：LB/RB 切换媒体库，提示条随页面变化
+useGamepadContext({
+  id: 'library',
+  hints: { 'prev-tab': '上一个媒体库', 'next-tab': '下一个媒体库', search: '搜索番剧' },
+  handle(action) {
+    if (action === 'prev-tab') { shiftLibrary(-1); return true }
+    if (action === 'next-tab') { shiftLibrary(1); return true }
+    return false
+  },
+})
 function openSeries(series) {
   router.push({
     name: series.kind === 'video' ? 'watch' : 'series',
@@ -84,8 +101,8 @@ function openSeries(series) {
       <p v-if="!keyword && (data?.root || selectedLibrary?.root)" class="media-root mono">{{ data?.root || selectedLibrary?.root }}</p>
     </div>
     <div v-else class="poster-grid">
-      <button v-for="s in filtered" :key="s.path" class="poster-card" @click="openSeries(s)" :title="s.name">
-        <div class="poster-wrap"><Poster :name="s.mediaCount > 1 ? s.name : s.media?.title || s.name" :src="s.media?.cover ? mediaCoverUrl(s.media.cover, s.libraryId || selectedId) : ''" :poster="s.poster || ''" :library="s.libraryId || selectedId" /><div class="hover-play"><span><Icon name="play" :size="24" /></span></div><span v-if="s.count" class="count-chip">{{ s.count }} 集</span><span v-if="s.mediaCount > 1" class="season-chip">{{ s.mediaCount }} 季</span></div>
+      <button v-for="(s, index) in filtered" :key="s.path" class="poster-card" data-gp-card :data-gp-autofocus="index === 0 ? '' : undefined" @click="openSeries(s)" :title="s.name">
+        <div class="poster-wrap"><Poster :name="s.mediaCount > 1 ? s.name : s.media?.title || s.name" :src="s.media?.cover ? mediaCoverUrl(s.media.cover, s.libraryId || selectedId) : s.localCover ? mediaCoverUrl(s.localCover, s.libraryId || selectedId) : ''" :poster="s.poster || ''" :library="s.libraryId || selectedId" /><div class="hover-play"><span><Icon name="play" :size="24" /></span></div><span v-if="s.count" class="count-chip">{{ s.count }} 集</span><span v-if="s.mediaCount > 1" class="season-chip">{{ s.mediaCount }} 季</span></div>
         <div class="poster-title">{{ prettyTitle(s.mediaCount > 1 ? s.name : s.media?.title || s.name) }}</div>
       </button>
     </div>
@@ -101,9 +118,13 @@ function openSeries(series) {
 .library-tabs { display: flex; align-items: center; gap: 6px; overflow-x: auto; min-width: 0; scrollbar-width: thin; }
 .library-tab { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid transparent; border-radius: 7px; color: var(--text-faint); font-size: 12px; white-space: nowrap; }.library-tab:hover { color: var(--text); background: #ffffff04; }.library-tab.active { color: #ccb9fc; background: #a78bfa12; border-color: #a78bfa25; }.library-tab.unavailable:not(.active) { color: #8c7f87; }.unavailable-dot { width: 4px; height: 4px; border-radius: 50%; background: var(--err); }
 .tools { display: flex; gap: 8px; align-items: center; flex: none; }.search { display: flex; align-items: center; gap: 8px; height: 33px; width: 220px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg-elev); color: var(--text-faint); }.search:focus-within { border-color: #a78bfa66; }.search input { background: transparent; border: none; outline: none; color: var(--text); width: 100%; min-width: 0; font-size: 12px; }.tools select { height: 33px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg-elev); color: var(--text-dim); font-size: 12px; }.refresh-button { width: 33px; height: 33px; display: grid; place-items: center; padding: 0; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--text-dim); }.refresh-button:hover { color: var(--accent); background: var(--bg-elev); }.refresh-button:disabled { opacity: .4; }
-.poster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(125px, 1fr)); gap: 22px 12px; }.poster-card { padding: 0; min-width: 0; text-align: left; }.poster-wrap { position: relative; overflow: hidden; border-radius: 6px; outline: 1px solid var(--line); }.poster-card:hover .poster-wrap { outline-color: #a78bfa77; }.count-chip { position: absolute; right: 5px; bottom: 5px; padding: 2px 5px; border-radius: 3px; color: #eeecf8; font-size: 10px; line-height: 1.6; background: #09090dcc; }.season-chip { position: absolute; top: 5px; left: 5px; padding: 2px 5px; border-radius: 3px; color: #d8c8ff; font-size: 9px; line-height: 1.6; background: #09090dcc; }.poster-title { margin-top: 8px; color: #ccc9d7; font-size: 12px; line-height: 1.6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }.poster-card:hover .poster-title { color: var(--accent); }.hover-play { position: absolute; inset: 0; display: grid; place-items: center; background: #09090d60; opacity: 0; transition: opacity .15s; }.hover-play > span { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 50%; background: #a78bfadd; color: #fff; }.poster-card:hover .hover-play, .poster-card:focus-visible .hover-play { opacity: 1; }.poster-skeleton { aspect-ratio: 2/3; }.text-skeleton { width: 80%; height: 11px; margin-top: 8px; }.media-root { color: var(--text-faint); font-size: 11px !important; }
+.poster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(125px, 1fr)); gap: 22px 12px; }.poster-card { padding: 0; min-width: 0; text-align: left; }.poster-wrap { position: relative; overflow: hidden; border-radius: 6px; outline: 1px solid var(--line); }.poster-card:is(:hover, [data-gp-focused]) .poster-wrap { outline-color: #a78bfa77; }.count-chip { position: absolute; right: 5px; bottom: 5px; padding: 2px 5px; border-radius: 3px; color: #eeecf8; font-size: 10px; line-height: 1.6; background: #09090dcc; }.season-chip { position: absolute; top: 5px; left: 5px; padding: 2px 5px; border-radius: 3px; color: #d8c8ff; font-size: 9px; line-height: 1.6; background: #09090dcc; }.poster-title { margin-top: 8px; color: #ccc9d7; font-size: 12px; line-height: 1.6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }.poster-card:is(:hover, [data-gp-focused]) .poster-title { color: var(--accent); }.hover-play { position: absolute; inset: 0; display: grid; place-items: center; background: #09090d60; opacity: 0; transition: opacity .15s; }.hover-play > span { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 50%; background: #a78bfadd; color: #fff; }.poster-card:is(:hover, [data-gp-focused]) .hover-play, .poster-card:focus-visible .hover-play { opacity: 1; }.poster-skeleton { aspect-ratio: 2/3; }.text-skeleton { width: 80%; height: 11px; margin-top: 8px; }.media-root { color: var(--text-faint); font-size: 11px !important; }
 @media(max-width: 1050px) { .library-toolbar { flex-wrap: wrap; gap: 14px; }.library-tabs { width: 100%; }.tools { width: 100%; }.search { flex: 1; width: auto; } }
 @media(max-width:1000px) and (min-width:601px) { .poster-grid { grid-template-columns: repeat(auto-fill,minmax(100px,1fr)); gap: 18px 9px; } }
 @media(max-width:600px) { .library-page { padding-top: 19px; }.page-title h1 { font-size: 20px; }.page-title { gap: 9px; }.page-title > span { font-size: 11px; }.browse-link { font-size: 11px; }.library-tab { padding: 7px 10px; }.poster-grid { grid-template-columns: repeat(3,minmax(0,1fr)); gap: 17px 9px; }.poster-title { font-size: 12px; }.library-toolbar { margin-bottom: 17px; } }
 @media(max-width:370px) { .poster-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }.page-title > span { display: none; } }
+
+/* 手柄选中态细节：封面描边与标题在全局高亮环之上再提亮 */
+html.gp-mode .poster-card[data-gp-focused] .poster-wrap { outline-color: #e2d7ff; }
+.poster-card[data-gp-focused] .poster-title { color: #f0e9ff; }
 </style>

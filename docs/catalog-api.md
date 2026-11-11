@@ -1,7 +1,7 @@
 # 影视库 SQLite API
 
 这批接口查询 SQLite，按已确认的 `media / local_media / local_media_video / media_tracks / task` 结构实现。
-启动后自动升级到 v6，保留旧观看进度、登录会话和加密模型配置。
+启动后自动升级到 v7，保留旧观看进度、登录会话和加密模型配置。
 配置 `AUTH_SECRET` 时所有接口需要现有登录 Cookie；写请求沿用现有 Origin 检查。
 
 ## 接口
@@ -61,13 +61,18 @@
   "mediaPath": "第01集.mkv",
   "videoIndex": 1,
   "videoType": "main",
-  "durationMs": 1440000
+  "durationMs": 1440000,
+  "width": 1920,
+  "height": 1080,
+  "frameCount": 34560
 }
 ```
 
 `mediaId` 由目录推导；显式提供时必须与目录一致。`title` 缺省取文件名。
-可填写 `coverPath`、`sizeBytes`、`mtimeMs`、`missing`。封面和视频路径相对于本地目录，允许子目录，拒绝绝对路径及目录穿越。
-番外使用 `videoType: "extra"`，例如 `videoIndex: 12.5`。不同内容不能使用同一影视和集号。
+可填写 `coverPath`、`sizeBytes`、`mtimeMs`、`width`、`height`、`frameCount`、`missing`。`mediaPath` 相对于本地目录，允许子目录，拒绝绝对路径及目录穿越。
+扫描已绑定目录时会抽取视频中间帧生成 480p JPEG，`coverPath` 保存为相对 `DATA_DIR` 的 `local-media/<localMediaId>/<hash>.jpg`，通过 `/assets/local-media/...` 提供；生成失败时保持可空。
+扫描同时用 ffprobe 写入 `durationMs`、`width`、`height`、`frameCount`，便于归档和人工核对片源；已有且未变化的视频不重复探测。
+`videoType` 由扫描根据媒体的 Bangumi `episodeCount` 自动判定：集号为 1..总集数的整数且在正片目录中的视频为 `main`；`特典/SP/PV/CM/NCOP/NCED` 等目录、超出总集数或 11.5 这类非整数集号为 `extra`。番外建议使用 `12.5` 这类排在本季之后的 `videoIndex`；Agent 可用 `update_videos` 工具修正自动分类。不同内容不能使用同一影视和集号。
 `GET` 支持 `mediaId`、`localMediaId`、`videoType`、`missing=true/false` 和 `q`。
 这些接口仅保存 / 删除索引记录，不读取、移动或删除磁盘上的视频文件；实际播放时仍需校验文件路径。
 

@@ -7,7 +7,7 @@ import { capabilities } from './ffmpeg.service.ts'
 import type { AniShareDatabase, DatabaseInfo } from '../model/database.ts'
 import type { MediaEntry, ScanEntry } from '../model/media.model.ts'
 import type { FfmpegCapabilities } from './ffmpeg.service.ts'
-import type { AppConfig, Library, LocalMedia, Media } from '../types.ts'
+import type { AppConfig, Library, LocalMedia, LocalMediaVideo, Media } from '../types.ts'
 
 /** Cached scan statistics for one library root; `error` replaces the counts when a scan failed. */
 interface LibraryStatistics {
@@ -49,7 +49,7 @@ export interface LibraryCatalog {
 }
 
 /** A disk series plus the first media record bound to it (for covers and titles). */
-export type LibrarySeries = ScanEntry & { media: Media | null; mediaCount: number }
+export type LibrarySeries = ScanEntry & { media: Media | null; mediaCount: number; localCover: string | null }
 
 export interface SeriesVideo {
   name: string
@@ -57,6 +57,13 @@ export interface SeriesVideo {
   seasonPath: string
   seasonName: string
   mediaId: number | null
+  coverPath: string | null
+  videoType: 'main' | 'extra'
+  videoIndex: number
+  durationMs: number | null
+  width: number | null
+  height: number | null
+  frameCount: number | null
   size: number
   mtime: number
 }
@@ -166,10 +173,17 @@ export function createLibraryService({ database, settings = config }: LibrarySer
           const binding = matches
             .slice()
             .sort((a, b) => a.folderPath.length - b.folderPath.length || a.folderPath.localeCompare(b.folderPath, 'zh-CN'))[0]
+          const media = binding ? mediaById.get(binding.mediaId) ?? null : null
+          let localCover: string | null = null
+          if (binding && !media?.cover) {
+            const videos = database.catalog.videos.list({ limit: 5000, offset: 0, filters: { localMediaId: binding.id } }).items
+            localCover = videos.find((video) => !video.missing && video.coverPath)?.coverPath ?? null
+          }
           return {
             ...entry,
-            media: binding ? mediaById.get(binding.mediaId) ?? null : null,
+            media,
             mediaCount: new Set(matches.map((item) => item.mediaId)).size,
+            localCover,
           }
         })
         statistics.set(library.id, {
@@ -206,6 +220,12 @@ export function createLibraryService({ database, settings = config }: LibrarySer
       const media = [...new Set(bindings.map((binding) => binding.mediaId))]
         .map((id) => mediaById.get(id))
         .filter((item): item is Media => Boolean(item))
+      const rows = new Map<string, LocalMediaVideo>()
+      for (const binding of bindings) {
+        for (const video of database.catalog.videos.list({ limit: 5000, offset: 0, filters: { localMediaId: binding.id } }).items) {
+          if (!video.missing) rows.set(`${binding.id}:${video.mediaPath}`, video)
+        }
+      }
       const videos: SeriesVideo[] = []
       const walk = async (directory: string, depth: number): Promise<void> => {
         if (depth > 6 || videos.length >= 2000) return
@@ -226,12 +246,26 @@ export function createLibraryService({ database, settings = config }: LibrarySer
             .filter((item) => directoryRel === item.folderPath || directoryRel.startsWith(item.folderPath + '/'))
             .sort((a, b) => b.folderPath.length - a.folderPath.length)[0]
           const subPath = directoryRel === relRoot ? '' : directoryRel.slice(relRoot.length + 1)
+          let row: LocalMediaVideo | undefined
+          if (binding) {
+            const dbMediaPath = directoryRel === binding.folderPath
+              ? item.name
+              : directoryRel.slice(binding.folderPath.length + 1) + '/' + item.name
+            row = rows.get(`${binding.id}:${dbMediaPath}`)
+          }
           videos.push({
             name: item.name,
             path: videoPath,
             seasonPath: subPath ? '/' + subPath.split('/').map(encodeURIComponent).join('/') : virtualPath,
             seasonName: subPath || '全部剧集',
             mediaId: binding?.mediaId ?? null,
+            coverPath: row?.coverPath ?? null,
+            videoType: row?.videoType === 'extra' ? 'extra' : 'main',
+            videoIndex: row?.videoIndex ?? 0,
+            durationMs: row?.durationMs ?? null,
+            width: row?.width ?? null,
+            height: row?.height ?? null,
+            frameCount: row?.frameCount ?? null,
             size: stat.size,
             mtime: stat.mtimeMs,
           })
@@ -244,9 +278,13 @@ export function createLibraryService({ database, settings = config }: LibrarySer
         const stat = await fs.stat(absolute).catch(() => null)
         if (stat) {
           const binding = bindings.find((item) => item.folderPath === relRoot)
+          const row = binding ? rows.get(`${binding.id}:${entry.name}`) : undefined
           videos.push({
             name: entry.name, path: virtualPath, seasonPath: '', seasonName: '全部剧集',
-            mediaId: binding?.mediaId ?? null, size: stat.size, mtime: stat.mtimeMs,
+            mediaId: binding?.mediaId ?? null, coverPath: row?.coverPath ?? null,
+            videoType: row?.videoType === 'extra' ? 'extra' : 'main', videoIndex: row?.videoIndex ?? 0,
+            durationMs: row?.durationMs ?? null, width: row?.width ?? null, height: row?.height ?? null,
+            frameCount: row?.frameCount ?? null, size: stat.size, mtime: stat.mtimeMs,
           })
         }
       }

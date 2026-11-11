@@ -4,7 +4,7 @@ import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completio
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy'
 import { anthropicMessagesApi } from '@earendil-works/pi-ai/api/anthropic-messages.lazy'
 import type { AiConfig } from '../types.ts'
-import type { AgentRunOptions, AgentRunResult } from './types.ts'
+import type { AgentConversationTurn, AgentRunOptions, AgentRunResult, AgentStreamEvent } from './types.ts'
 
 const API_FACTORIES: Record<string, () => unknown> = {
   'openai-completions': openAICompletionsApi,
@@ -12,6 +12,42 @@ const API_FACTORIES: Record<string, () => unknown> = {
   'anthropic-messages': anthropicMessagesApi,
 }
 const PROVIDER_ID = 'anishare-configured'
+
+/** 对话型 Agent 每次请求可回放的历史上限；与 Chat Service 的入参校验保持一致。 */
+export const HISTORY_MAX_TURNS = 40
+export const HISTORY_MAX_CHARS = 48_000
+export const HISTORY_TURN_MAX_CHARS = 8_000
+
+const seededUsage = {
+  input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+}
+
+/**
+ * 把历史轮次还原成 SDK 能理解的 user/assistant 消息。
+ * 只回放已结束的轮次；最新一条用户消息始终走 `prompt()`，避免与系统提示词顺序冲突。
+ */
+function seededHistory(config: AiConfig, history: AgentConversationTurn[] | undefined): any[] {
+  if (history === undefined) return []
+  if (!Array.isArray(history) || history.length > HISTORY_MAX_TURNS) {
+    throw agentError('PI_HISTORY_INVALID', '对话历史过长，请先清空对话。', 400)
+  }
+  let total = 0
+  return history.map((turn) => {
+    const content = turn && typeof turn.content === 'string' ? turn.content.trim() : ''
+    if (!turn || (turn.role !== 'user' && turn.role !== 'assistant') || !content || content.length > HISTORY_TURN_MAX_CHARS) {
+      throw agentError('PI_HISTORY_INVALID', '对话历史格式无效，请先清空对话。', 400)
+    }
+    total += content.length
+    if (total > HISTORY_MAX_CHARS) throw agentError('PI_HISTORY_INVALID', '对话历史过长，请先清空对话。', 400)
+    const timestamp = Date.now()
+    if (turn.role === 'user') return { role: 'user', content, timestamp }
+    return {
+      role: 'assistant', content: [{ type: 'text', text: content }], api: config.apiFormat,
+      provider: PROVIDER_ID, model: config.model, usage: seededUsage, stopReason: 'stop', timestamp,
+    }
+  })
+}
 
 export interface AgentError extends Error {
   code: string
@@ -211,21 +247,28 @@ export async function runPiAgent(config: AiConfig, { prompt, signal }: { prompt:
 }
 
 /**
- * Tool-enabled loop for background work (media scan). Every tool is bounded by
- * `maxToolCalls`; the conversation is bounded by `maxTurns` and an overall budget.
- * Tools that throw become error results for the model instead of failing the run.
+ * Tool-enabled loop for background work (media scan) and conversational agents.
+ * Every tool is bounded by `maxToolCalls`; the conversation is bounded by `maxTurns` and an
+ * overall budget. Tools that throw become error results for the model instead of failing the run.
+ * `history` is replayed as real prior turns, and `onEvent` streams text/tool activity to the caller.
  */
 export async function runPiAgentWithTools(config: AiConfig, {
-  prompt, systemPrompt, tools = [], signal, maxTurns = 10, maxToolCalls = 32, timeoutMs: budgetMs = 120000,
+  prompt, systemPrompt, tools = [], history, signal, maxTurns = 10, maxToolCalls = 32,
+  timeoutMs: budgetMs = 120000, onEvent,
 }: AgentRunOptions): Promise<AgentRunResult> {
   if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 200000) throw agentError('PI_PROMPT_INVALID', '模型请求内容为空或过长。', 400)
   if (typeof systemPrompt !== 'string' || !systemPrompt.trim() || systemPrompt.length > 100000) throw agentError('PI_PROMPT_INVALID', '系统提示词为空或过长。', 400)
   if (!Array.isArray(tools) || tools.length > 32) throw agentError('PI_TOOLS_INVALID', '工具定义无效。', 400)
   const runtime = createRuntime(config)
+  const seeded = seededHistory(config, history)
   if (signal?.aborted) throw agentError('PI_ABORTED', '模型请求已取消。', 499)
 
   let turns = 0
   let calls = 0
+  const emit = (event: AgentStreamEvent): void => {
+    // 展示回调属于调用方，抛错不能打断 Agent。
+    try { onEvent?.(event) } catch { /* ignored by design */ }
+  }
   const guarded = tools.map((tool) => ({
     ...tool,
     executionMode: tool.executionMode ?? 'sequential',
@@ -239,13 +282,29 @@ export async function runPiAgentWithTools(config: AiConfig, {
   const controller = new AbortController()
   const budget = budgetMs ?? 120000
   const agent: any = new Agent({
-    initialState: { model: runtime.model, systemPrompt, thinkingLevel: 'off', tools: guarded as any },
+    initialState: {
+      model: runtime.model, systemPrompt, thinkingLevel: 'off', tools: guarded as any,
+      ...(seeded.length ? { messages: seeded } : {}),
+    },
     identity: { attribution: null },
     streamFn: (selectedModel: unknown, context: unknown, options: any = {}) => runtime.models.streamSimple(selectedModel, context, streamOptions(runtime, controller, options)),
     finishTurn: async () => {
       turns += 1
       return turns >= maxTurns ? { action: 'end' } : undefined
     },
+  })
+  const unsubscribe = agent.subscribe((event: any) => {
+    if (event.type === 'message_update') {
+      const update = event.assistantMessageEvent
+      if (update?.type === 'text_delta' && typeof update.delta === 'string' && update.delta) emit({ type: 'delta', text: update.delta })
+    } else if (event.type === 'tool_execution_start') {
+      emit({ type: 'tool_start', toolCallId: String(event.toolCallId ?? ''), name: String(event.toolName ?? ''), args: event.args })
+    } else if (event.type === 'tool_execution_end') {
+      emit({
+        type: 'tool_end', toolCallId: String(event.toolCallId ?? ''), name: String(event.toolName ?? ''),
+        isError: Boolean(event.isError), ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
+      })
+    }
   })
 
   let timedOut = false
@@ -262,6 +321,7 @@ export async function runPiAgentWithTools(config: AiConfig, {
   } finally {
     clearTimeout(timer)
     signal?.removeEventListener('abort', onAbort)
+    unsubscribe()
     controller.abort()
     agent.abort()
   }

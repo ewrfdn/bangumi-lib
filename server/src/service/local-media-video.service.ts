@@ -8,9 +8,14 @@ export function createLocalMediaVideoService(models: CatalogModels): CatalogReso
     validators: {
       title: text('视频标题'), coverPath: nullable(relativePath), mediaId: id, videoIndex, mediaPath: relativePath, localMediaId: id,
       videoType: value => ['main', 'extra'].includes(value) ? value : invalid('视频类型必须为 main 或 extra'),
-      durationMs: value => number(value, '视频时长'), sizeBytes: value => number(value, '文件大小'), mtimeMs: value => number(value, '修改时间'), missing: boolean,
+      durationMs: value => number(value, '视频时长'), width: nullable(value => number(value, '视频宽度', 0, 100000)),
+      height: nullable(value => number(value, '视频高度', 0, 100000)), frameCount: nullable(value => number(value, '视频帧数')),
+      sizeBytes: value => number(value, '文件大小'), mtimeMs: value => number(value, '修改时间'), missing: boolean,
     },
-    defaults: { coverPath: null, videoType: 'main', durationMs: 0, sizeBytes: 0, mtimeMs: 0, missing: false },
+    defaults: {
+      coverPath: null, videoType: 'main', durationMs: 0, width: null, height: null, frameCount: null,
+      sizeBytes: 0, mtimeMs: 0, missing: false,
+    },
     required: ['mediaPath', 'localMediaId', 'videoIndex'],
     // 动态行数据（合并后的 local_media_video 记录）：字段已由 validators 校验，故此处显式 any。
     normalize(data: Record<string, any>): Record<string, any> {

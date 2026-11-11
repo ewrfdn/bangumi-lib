@@ -62,6 +62,14 @@ test('a manual scan returns a task id and records the tree', async () => {
     // AI 未启用时，需要分类的目录记为 failed 并等待下次扫描。
     assert.equal(tree.stats.failed >= 1, true)
     assert.equal(tree.items.find((item) => item.relPath === 'Show A/Season 1').status, 'failed')
+
+    // force=true 允许重试上一次没有成功分类的目录（忽略 mtime 缓存）。
+    const forced = await app.inject({ method: 'POST', url: '/api/libraries/bangumi/scan', payload: { maxDepth: 3, force: true } })
+    assert.equal(forced.statusCode, 202)
+    assert.equal(forced.json().force, true)
+    const forcedTask = await waitForTask(app, forced.json().taskId)
+    assert.equal(forcedTask.status, 'succeeded')
+    assert.equal(forcedTask.payload.force, true)
   } finally { await app.close() }
 })
 
@@ -71,6 +79,7 @@ test('scan endpoints validate their input', async () => {
     assert.equal((await app.inject({ method: 'POST', url: '/api/libraries/nope/scan' })).statusCode, 404)
     assert.equal((await app.inject({ method: 'POST', url: '/api/libraries/bangumi/scan', payload: { maxDepth: 99 } })).statusCode, 400)
     assert.equal((await app.inject({ method: 'POST', url: '/api/libraries/bangumi/scan', payload: { depth: 2 } })).statusCode, 400)
+    assert.equal((await app.inject({ method: 'POST', url: '/api/libraries/bangumi/scan', payload: { force: 'yes' } })).statusCode, 400)
     assert.equal((await app.inject('/api/lib-folders?library=nope')).statusCode, 404)
     assert.equal((await app.inject('/api/lib-folders?unexpected=1')).statusCode, 400)
   } finally { await app.close() }

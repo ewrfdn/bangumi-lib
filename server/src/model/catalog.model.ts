@@ -114,7 +114,8 @@ export function createCatalogModels(db: DatabaseHandle): CatalogModels {
 
   const videos = records<LocalMediaVideo>(db, 'local_media_video', {
     id: 'id', title: 'title', coverPath: 'cover_path', mediaId: 'media_id', videoIndex: 'video_index', mediaPath: 'media_path',
-    localMediaId: 'local_media_id', videoType: 'video_type', durationMs: 'duration_ms', sizeBytes: 'size_bytes', mtimeMs: 'mtime_ms', missing: 'missing', ...timestamps,
+    localMediaId: 'local_media_id', videoType: 'video_type', durationMs: 'duration_ms', width: 'width', height: 'height',
+    frameCount: 'frame_count', sizeBytes: 'size_bytes', mtimeMs: 'mtime_ms', missing: 'missing', ...timestamps,
   }, { booleans: ['missing'], order: 'video_index, id', search: ['title'] })
 
   const tracks = records<MediaTrack>(db, 'media_tracks', {

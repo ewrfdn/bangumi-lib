@@ -65,9 +65,16 @@ export function registerMediaController(app: FastifyInstance, { mediaService }: 
     return reply.header('Cache-Control', 'public, max-age=3600').type('text/vtt; charset=utf-8').send(text)
   })
   app.get<QueryRoute>('/api/stream-subtitle', async (request: FastifyRequest<QueryRoute>, reply: FastifyReply): Promise<FastifyReply> => {
-    const text = await mediaService.embeddedSubtitle(
-      stringValue(request.query.path), Number(stringValue(request.query.index)), stringValue(request.query.library),
+    const indexText = stringValue(request.query.index)
+    const source = await mediaService.openEmbeddedSubtitle(
+      stringValue(request.query.path), indexText === '' ? Number.NaN : Number(indexText), stringValue(request.query.library),
     )
-    return reply.header('Cache-Control', 'public, max-age=3600').type('text/vtt; charset=utf-8').send(text)
+    // 内挂字幕首次需要顺序读取整个视频：提取期间一边产出一边下发，浏览器原生 <track> 可渐进解析。
+    // 已缓存时直接读本地小文件；两种情况下浏览器都不缓存，由服务端按文件版本缓存。
+    reply.type('text/vtt; charset=utf-8')
+      .header('Cache-Control', 'no-store')
+      .header('X-Subtitle-Cache', source.cached ? 'hit' : 'miss')
+    if (source.length !== undefined) reply.header('Content-Length', String(source.length))
+    return reply.send(source.stream)
   })
 }

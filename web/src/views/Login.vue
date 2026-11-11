@@ -45,7 +45,7 @@ async function reconnect() {
       <form v-else @submit.prevent="submit">
         <label for="access-key">访问密钥</label>
         <div class="key-field" :class="{ invalid: error }">
-          <input id="access-key" v-model="key" :type="visible ? 'text' : 'password'" name="password" autocomplete="current-password" autofocus required :disabled="busy" :aria-invalid="!!error" :aria-describedby="error ? 'login-error' : undefined" placeholder="输入密钥" @input="error = ''" />
+          <input id="access-key" v-model="key" :type="visible ? 'text' : 'password'" name="password" autocomplete="current-password" autofocus data-gp-autofocus required :disabled="busy" :aria-invalid="!!error" :aria-describedby="error ? 'login-error' : undefined" placeholder="输入密钥" @input="error = ''" />
           <button type="button" class="visibility-button" :aria-label="visible ? '隐藏密钥' : '显示密钥'" :aria-pressed="visible" @click="visible = !visible"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path v-if="!visible" d="m3 3 18 18"/></svg></button>
         </div>
         <p v-if="error" id="login-error" class="login-error" role="alert">{{ error }}</p>

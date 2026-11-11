@@ -60,7 +60,7 @@ export function createDatabase(filename: string, defaultLibraryId = 'bangumi'): 
   if (filename !== ':memory:') fs.mkdirSync(path.dirname(filename), { recursive: true })
   const db: DatabaseHandle = new Database(filename)
   const version = db.pragma('user_version', { simple: true }) as number
-  if (version > 6) { db.close(); throw new Error('数据库版本高于当前程序支持的版本') }
+  if (version > 7) { db.close(); throw new Error('数据库版本高于当前程序支持的版本') }
   db.pragma('journal_mode = WAL')
   db.pragma('busy_timeout = 5000')
   db.pragma('foreign_keys = ON')
@@ -112,6 +112,11 @@ export function createDatabase(filename: string, defaultLibraryId = 'bangumi'): 
       if ((db.pragma('user_version', { simple: true }) as number) >= 6) return
       db.exec(fs.readFileSync(new URL('../../db/migrations/006_lib_folder.sql', import.meta.url), 'utf8'))
       db.pragma('user_version = 6')
+    }).immediate()
+    if (version < 7) db.transaction(() => {
+      if ((db.pragma('user_version', { simple: true }) as number) >= 7) return
+      db.exec(fs.readFileSync(new URL('../../db/migrations/007_video_metadata.sql', import.meta.url), 'utf8'))
+      db.pragma('user_version = 7')
     }).immediate()
   } catch (error) { db.close(); throw error }
   const progressList = db.prepare(`SELECT ${PROGRESS_COLUMNS} FROM playback_progress ORDER BY at DESC LIMIT 500`)

@@ -43,6 +43,9 @@ export const api = {
   aiConfig: () => getJSON('/api/admin/ai/config'),
   saveAiConfig: (config) => getJSON('/api/admin/ai/config', { method: 'PUT', body: config }),
   testAiConfig: (config) => getJSON('/api/admin/ai/test', { method: 'POST', body: config }),
+  searchConfig: () => getJSON('/api/admin/ai/search'),
+  saveSearchConfig: (config) => getJSON('/api/admin/ai/search', { method: 'PUT', body: config }),
+  testSearchConfig: (config) => getJSON('/api/admin/ai/search/test', { method: 'POST', body: config }),
   tasks: (params = {}) => getJSON(`/api/tasks?${q(params)}`),
   cancelTask: (id) => getJSON(`/api/tasks/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
   deleteTask: (id) => getJSON(`/api/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' }),
@@ -168,13 +171,13 @@ export const mediaTypeLabel = (type) => MEDIA_TYPE_LABELS[type] || type || ''
 export const mediaSourceLabel = (source) =>
   ({ bangumi: 'Bangumi', douban: '豆瓣' })[String(source || '').toLowerCase()] || source || ''
 
-/** 数据库封面：外部 URL、bangumi 本地资源或媒体库内相对路径。 */
+/** 数据库封面：外部 URL、Bangumi 资源、扫描生成的本地封面或媒体库内相对路径。 */
 export function mediaCoverUrl(cover, library = '') {
   if (!cover) return ''
   if (/^https?:\/\//i.test(cover)) return cover
   if (cover.startsWith('/')) return cover
   const parts = cover.split('/').filter(Boolean).map((part) => encodeURIComponent(part))
-  if (cover.startsWith('bangumi/')) return `/assets/${parts.join('/')}`
+  if (cover.startsWith('bangumi/') || cover.startsWith('local-media/')) return `/assets/${parts.join('/')}`
   return api.fileUrl(cover, library)
 }
 

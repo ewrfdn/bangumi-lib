@@ -37,31 +37,42 @@ const mediaById = computed(() => new Map((detail.value?.media || []).map((item) 
 const groups = computed(() => {
   const map = new Map()
   for (const video of detail.value?.videos || []) {
-    const key = video.mediaId ? `media:${video.mediaId}` : `season:${video.seasonPath}`
+    const type = video.videoType === 'extra' ? 'extra' : 'main'
+    const key = video.mediaId ? `media:${video.mediaId}:${type}` : `season:${video.seasonPath}:${type}`
     let group = map.get(key)
     if (!group) {
-      group = { key, mediaId: video.mediaId || null, media: mediaById.value.get(video.mediaId) || null, seasonName: video.seasonName, videos: [] }
+      group = {
+        key, mediaId: video.mediaId || null, media: mediaById.value.get(video.mediaId) || null,
+        seasonName: video.seasonName, videoType: type, videos: [],
+      }
       map.set(key, group)
     }
     group.videos.push(video)
   }
   const list = [...map.values()]
-  for (const group of list) group.videos.sort((a, b) => a.path.localeCompare(b.path, 'zh-CN', { numeric: true }))
+  for (const group of list) group.videos.sort((a, b) => (a.videoIndex || 0) - (b.videoIndex || 0)
+    || a.path.localeCompare(b.path, 'zh-CN', { numeric: true }))
   return list.sort((a, b) => {
     const sa = a.media?.season ?? 999
     const sb = b.media?.season ?? 999
     if (sa !== sb) return sa - sb
+    if (a.videoType !== b.videoType) return a.videoType === 'main' ? -1 : 1
     return groupTitle(a).localeCompare(groupTitle(b), 'zh-CN', { numeric: true })
   })
 })
-const heroMedia = computed(() => groups.value[0]?.media || detail.value?.media?.[0] || null)
+const heroMedia = computed(() => groups.value.find((group) => group.videoType === 'main')?.media || groups.value[0]?.media || detail.value?.media?.[0] || null)
 const title = computed(() => detail.value?.media?.length > 1 ? detail.value.name : heroMedia.value?.title || detail.value?.name || '')
 const originalTitle = computed(() => heroMedia.value?.attribute?.metadata?.originalTitle || '')
-const cover = computed(() => mediaCoverUrl(heroMedia.value?.cover, detail.value?.libraryId))
+const localCover = computed(() => detail.value?.videos?.find((video) => video.videoType !== 'extra' && video.coverPath)?.coverPath
+  || detail.value?.videos?.find((video) => video.coverPath)?.coverPath || '')
+const cover = computed(() => mediaCoverUrl(heroMedia.value?.cover, detail.value?.libraryId) || mediaCoverUrl(localCover.value))
 const type = computed(() => mediaTypeLabel(heroMedia.value?.mediaType))
 const source = computed(() => mediaSourceLabel(heroMedia.value?.dataSource))
 const totalVideos = computed(() => detail.value?.videos?.length || 0)
-const firstVideo = computed(() => groups.value[0]?.videos?.[0] || null)
+const totalMain = computed(() => (detail.value?.videos || []).filter((video) => video.videoType !== 'extra').length)
+const totalExtra = computed(() => (detail.value?.videos || []).filter((video) => video.videoType === 'extra').length)
+const firstVideo = computed(() => groups.value.find((group) => group.videoType === 'main')?.videos?.[0]
+  || groups.value[0]?.videos?.[0] || null)
 const hasTags = computed(() => Boolean(heroMedia.value?.tags?.length))
 const visibleTags = computed(() => {
   const tags = heroMedia.value?.tags || []
@@ -83,18 +94,27 @@ const meta = computed(() => {
 })
 
 function groupTitle(group) {
+  const base = group.media?.title || group.seasonName || '全部剧集'
+  if (group.videoType === 'extra') return group.media ? `${base} · 番外` : '番外'
   if (!group.media) return group.seasonName || '全部剧集'
-  const base = group.media.title
   if (!group.seasonName || group.seasonName === '全部剧集' || base.includes(group.seasonName)) return base
   return `${base} · ${group.seasonName}`
 }
 function episodeNumber(video, index) {
-  const parsed = parseEpisode(video.name).episode
+  if (video.videoType === 'extra') return `番外 ${String(index + 1).padStart(2, '0')}`
+  const parsed = Number(video.videoIndex) || parseEpisode(video.name).episode
   const value = Number.isInteger(parsed) && parsed > 0 && parsed < 1000 ? parsed : index + 1
   return String(value).padStart(2, '0')
 }
 function episodeFile(video) {
   return video.size ? fmtSize(video.size) : video.name.replace(/\.[^.]+$/, '')
+}
+function episodeTooltip(video) {
+  const parts = [video.name]
+  if (video.width && video.height) parts.push(`${video.width}×${video.height}`)
+  if (video.frameCount) parts.push(`${video.frameCount} 帧`)
+  if (video.durationMs) parts.push(`${Math.round(video.durationMs / 60000)} 分钟`)
+  return parts.join('\n')
 }
 function play(video) {
   if (!video) return
@@ -155,15 +175,19 @@ function libraryTarget() {
 
       <section id="episodes" class="episodes">
         <div class="episodes-heading">
-          <div><h2>剧集选择</h2><p v-if="totalVideos">共 {{ totalVideos }} 集，点击集数开始播放</p><p v-else>这个目录里还没有识别到视频文件</p></div>
+          <div><h2>剧集选择</h2><p v-if="totalVideos">共 {{ totalMain }} 集正片<template v-if="totalExtra"> · {{ totalExtra }} 个番外</template>，点击集数开始播放</p><p v-else>这个目录里还没有识别到视频文件</p></div>
           <span v-if="totalVideos" class="episode-count">{{ totalVideos }}</span>
         </div>
         <div v-if="!groups.length" class="empty"><div class="empty-icon"><Icon name="film" :size="26" /></div><h3>还没有剧集</h3><p class="muted">把视频放进这个目录后，在媒体库页刷新即可。</p><router-link class="btn small" :to="browseTarget()">打开文件浏览</router-link></div>
-        <div v-for="group in groups" :key="group.key" class="group">
-          <div v-if="groups.length > 1" class="group-heading"><h3>{{ groupTitle(group) }}</h3><span>{{ group.videos.length }} 集</span></div>
+        <div v-for="(group, groupIndex) in groups" :key="group.key" class="group">
+          <div v-if="groups.length > 1" class="group-heading"><h3>{{ groupTitle(group) }}</h3><span>{{ group.videoType === 'extra' ? `${group.videos.length} 个番外` : `${group.videos.length} 集` }}</span></div>
           <div class="episode-grid">
-            <button v-for="(video, index) in group.videos" :key="video.path" type="button" class="episode" :title="video.name" @click="play(video)">
-              <span class="episode-no">{{ episodeNumber(video, index) }}</span>
+            <button v-for="(video, index) in group.videos" :key="video.path" type="button" class="episode" data-gp-card :data-gp-autofocus="groupIndex === 0 && index === 0 ? '' : undefined" :title="episodeTooltip(video)" @click="play(video)">
+              <span class="episode-thumb">
+                <img v-if="video.coverPath" :src="mediaCoverUrl(video.coverPath)" alt="" loading="lazy" @error="$event.target.style.display = 'none'" />
+                <span v-else class="episode-thumb-empty"><Icon name="film" :size="16" /></span>
+                <span class="episode-no" :class="{ extra: video.videoType === 'extra' }">{{ episodeNumber(video, index) }}</span>
+              </span>
               <span class="episode-name">{{ episodeFile(video) }}</span>
             </button>
           </div>
@@ -207,11 +231,16 @@ function libraryTarget() {
 .group-heading { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
 .group-heading h3 { margin: 0; color: var(--text); font-size: 13px; font-weight: 500; }
 .group-heading span { color: var(--text-faint); font-size: 10px; }
-.episode-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
-.episode { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-height: 62px; padding: 9px 11px; border: 1px solid var(--line-strong); border-radius: 7px; background: #101016; text-align: left; transition: border-color .15s, background .15s; }
-.episode:hover { border-color: #a78bfa66; background: #a78bfa0a; }
-.episode-no { color: #d8c8ff; font-size: 20px; font-weight: 500; line-height: 1.1; font-variant-numeric: tabular-nums; }
-.episode-name { width: 100%; color: var(--text-faint); font-size: 9px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.episode-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 10px; }
+.episode { display: flex; flex-direction: column; align-items: stretch; gap: 0; overflow: hidden; padding: 0; border: 1px solid var(--line-strong); border-radius: 7px; background: #101016; text-align: left; transition: border-color .15s, background .15s; }
+.episode:is(:hover, [data-gp-focused]) { border-color: #a78bfa66; background: #a78bfa0a; }
+.episode-thumb { position: relative; display: grid; place-items: center; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; background: #0b0b10; }
+.episode-thumb img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; transition: transform .2s; }
+.episode:is(:hover, [data-gp-focused]) .episode-thumb img { transform: scale(1.03); }
+.episode-thumb-empty { color: #a78bfa55; }
+.episode-no { position: absolute; left: 6px; bottom: 5px; padding: 1px 5px; border-radius: 4px; background: #09090dc7; color: #e7ddff; font-size: 16px; font-weight: 600; line-height: 1.45; font-variant-numeric: tabular-nums; }
+.episode-no.extra { font-size: 10px; letter-spacing: .02em; }
+.episode-name { width: 100%; padding: 6px 8px 7px; color: var(--text-faint); font-size: 9px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .series-loading { display: grid; grid-template-columns: 248px 1fr; gap: 30px; }
 .cover-skeleton { aspect-ratio: 2 / 3; border-radius: 8px; }
 .loading-lines { padding-top: 12px; }
@@ -219,5 +248,10 @@ function libraryTarget() {
 .loading-lines .line { width: 80%; height: 12px; margin-bottom: 10px; }
 .loading-lines .line.short { width: 55%; }
 @media(max-width:800px) { .hero { grid-template-columns: 190px minmax(0, 1fr); gap: 22px; }.series-loading { grid-template-columns: 190px 1fr; }.title-row h1 { font-size: 22px; } }
-@media(max-width:640px) { .series-page { padding-top: 16px; }.hero { grid-template-columns: 1fr; gap: 18px; }.hero-cover { width: 132px; }.series-loading { grid-template-columns: 1fr; }.cover-skeleton { width: 132px; }.title-row h1 { font-size: 21px; }.episode-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }.episode { min-height: 58px; padding: 8px 10px; }.episode-no { font-size: 18px; }.meta { grid-template-columns: 58px minmax(0, 1fr); } }
+@media(max-width:640px) { .series-page { padding-top: 16px; }.hero { grid-template-columns: 1fr; gap: 18px; }.hero-cover { width: 132px; }.series-loading { grid-template-columns: 1fr; }.cover-skeleton { width: 132px; }.title-row h1 { font-size: 21px; }.episode-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }.episode-no { font-size: 15px; }.meta { grid-template-columns: 58px minmax(0, 1fr); } }
+
+/* 手柄选中态细节：剧集卡片背景 / 边框与集数提亮 */
+.episode[data-gp-focused] { border-color: #c4b5fd; background: #a78bfa14; }
+.episode[data-gp-focused] .episode-no { color: #fff; }
+.episode[data-gp-focused] .episode-name { color: #cbc3da; }
 </style>

@@ -11,9 +11,11 @@ process.env.BANGUMI_LIBRARY = path.join(temporary, 'library')
 
 const libraryRoot = path.join(temporary, 'library')
 await fs.mkdir(path.join(libraryRoot, 'Show A', 'Season 1'), { recursive: true })
+await fs.mkdir(path.join(libraryRoot, 'Editable'), { recursive: true })
 await fs.writeFile(path.join(libraryRoot, 'Show A', 'Season 1', '01.mkv'), 'episode one')
 await fs.writeFile(path.join(libraryRoot, 'Show A', 'Season 1', '02.mkv'), 'episode two')
 await fs.writeFile(path.join(libraryRoot, 'Show A', 'Season 1', '01.ass'), 'subtitle')
+await fs.writeFile(path.join(libraryRoot, 'Editable', '01.mkv'), 'editable')
 
 const { config } = await import('../src/config.ts')
 const { createDatabase } = await import('../src/model/database.ts')
@@ -40,7 +42,7 @@ const run = (name, params) => tool(name).execute('call-1', params, new AbortCont
 
 test('list_folder returns direct children without the subtitle noise of nested folders', async () => {
   const root = await run('list_folder', { path: '' })
-  assert.deepEqual(root.items.map((item) => item.name), ['Show A'])
+  assert.deepEqual(root.items.map((item) => item.name), ['Editable', 'Show A'])
 
   const season = await run('list_folder', { path: 'Show A/Season 1' })
   assert.deepEqual(season.items.map((item) => [item.name, item.kind]), [
@@ -62,8 +64,7 @@ test('create_media_from_folder records an unknown work that is distinguishable f
   await assert.rejects(() => run('create_media_from_folder', { path: '' }), { status: 400 })
 })
 
-test('sync_local_media binds the folder and only ingests video files', async () => {
-  const media = catalog.create({ title: 'Show A', mediaType: 'anime' })
+test('sync_local_media binds the folder and only ingests video files', async () => {  const media = catalog.create({ title: 'Show A', mediaType: 'anime' })
   const first = await run('sync_local_media', { path: 'Show A/Season 1', mediaId: media.id })
 
   assert.equal(first.total, 2)
@@ -107,7 +108,7 @@ test('scan sends changed folders to the agent and only syncs folders already bou
     dataSource: 'bangumi', dataSourceUrl: 'https://bgm.tv/subject/400602',
     attribute: { metadata: { source: 'bangumi', sourceId: '400602' } },
   })
-  mediaSync.bindFolder({ libraryId: 'bangumi', relPath: 'Show A/Season 1', mediaId: media.id })
+  await mediaSync.bindFolder({ libraryId: 'bangumi', relPath: 'Show A/Season 1', mediaId: media.id })
 
   await fs.writeFile(path.join(libraryRoot, 'Show A', 'Season 1', '03.mkv'), 'episode three')
   calls.length = 0
@@ -118,11 +119,64 @@ test('scan sends changed folders to the agent and only syncs folders already bou
   assert.equal(videos.length, 3)
 })
 
+test('only the folder level that directly contains videos is sent to the agent', async () => {
+  await fs.mkdir(path.join(libraryRoot, 'Bundled', 'Group'), { recursive: true })
+  await fs.writeFile(path.join(libraryRoot, 'Bundled', 'Group', '01.mkv'), 'episode')
+
+  const calls = []
+  const mediaAgent = { enabled: () => true, async classify(context) { calls.push(context.folder.relPath) } }
+  const scanner = createScanService({ libFolderService: libFolder, mediaSync, models, settings: config, mediaAgent })
+  await scanner.scanLibrary('bangumi', { maxDepth: 3 })
+
+  assert.equal(calls.includes('Bundled'), false, '纯容器目录不调用 Agent')
+  assert.ok(calls.includes('Bundled/Group'), '视频所在层交给 Agent，绑定路径即该目录')
+})
+
+test('agent receives ancestor bindings for a subfolder of a bound work and does not duplicate the binding', async () => {
+  const parent = catalog.create({
+    title: 'Show A 合集', mediaType: 'anime',
+    dataSource: 'bangumi', dataSourceUrl: 'https://bgm.tv/subject/400602',
+    attribute: { metadata: { source: 'bangumi', sourceId: '400602' } },
+  })
+  await mediaSync.bindFolder({ libraryId: 'bangumi', relPath: 'Show A', mediaId: parent.id })
+  await fs.mkdir(path.join(libraryRoot, 'Show A', 'Season 2'), { recursive: true })
+  await fs.writeFile(path.join(libraryRoot, 'Show A', 'Season 2', '01.mkv'), 'episode')
+
+  const calls = []
+  const mediaAgent = { enabled: () => true, async classify(context) { calls.push(context) } }
+  const scanner = createScanService({ libFolderService: libFolder, mediaSync, models, settings: config, mediaAgent })
+  await scanner.scanLibrary('bangumi', { maxDepth: 3 })
+
+  const call = calls.find((context) => context.folder.relPath === 'Show A/Season 2')
+  assert.ok(call, '位于已绑定作品内部的视频目录仍交给 Agent 判定')
+  assert.deepEqual(call.ancestors.map((item) => item.path), ['Show A'], '祖先绑定信息随上下文传入')
+  assert.equal(call.ancestors[0].mediaId, parent.id)
+  assert.equal(call.ancestors[0].title, 'Show A 合集')
+  assert.equal(mediaSync.findBinding('bangumi', 'Show A/Season 2'), null, '不应产生重复绑定')
+  const videos = models.videos.list({ limit: 50, offset: 0, filters: { mediaId: parent.id } }).items
+  assert.ok(videos.some((video) => video.mediaPath.includes('Season 2')), '子目录视频由祖先绑定递归同步')
+})
+
 test('media scan tools reject a library without a root instead of failing on path.resolve', () => {
   assert.throws(
     () => createMediaScanTools({ library: { id: 'bangumi', name: '番剧库' }, services, models, mediaSync }),
     /缺少根目录/,
   )
+})
+
+test('media scan tools expose and correct video type/index for ambiguous folders', async () => {
+  const media = catalog.create({ title: 'Editable', mediaType: 'anime' })
+  await run('sync_local_media', { path: 'Editable', mediaId: media.id })
+  const binding = await run('get_folder_binding', { path: 'Editable' })
+  const first = binding.videos[0]
+  assert.equal(first.type, 'main')
+  assert.equal(first.id > 0, true)
+
+  const updated = await run('update_videos', { videos: [{ id: first.id, videoType: 'extra', videoIndex: 12.5 }] })
+  assert.equal(updated.count, 1)
+  const after = await run('get_folder_binding', { path: 'Editable' })
+  assert.equal(after.videos[0].type, 'extra')
+  assert.equal(after.videos[0].index, 12.5)
 })
 
 test('a disabled agent defers new folders instead of marking them processed', async () => {

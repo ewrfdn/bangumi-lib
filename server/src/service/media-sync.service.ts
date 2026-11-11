@@ -3,7 +3,10 @@ import path from 'node:path'
 import { HttpError } from '../errors.ts'
 import { VIDEO_EXTS } from '../model/media.model.ts'
 import { folderHash } from './local-media.service.ts'
+import { probe } from './ffmpeg.service.ts'
+import { classifyVideos, parseEpisodeNumber } from './video-classification.ts'
 import type { CatalogModels } from '../model/catalog.model.ts'
+import type { VideoCoverGenerator } from './video-cover.service.ts'
 import type { AppConfig, Library, LibraryId, LocalMedia, LocalMediaVideo } from '../types.ts'
 
 const SYSTEM_DIRECTORIES = new Set(['@eadir', '#recycle', '$recycle.bin', 'system volume information', 'node_modules'])
@@ -11,16 +14,7 @@ const ignored = (name: string): boolean => name.startsWith('.') || SYSTEM_DIRECT
 const cancelled = (): HttpError => new HttpError(499, '操作已取消', 'CANCELLED')
 
 /** 从文件名推断集号；推断不出时由调用方按顺序编号。 */
-export function videoIndexOf(name: string): number | null {
-  const base = path.parse(name).name
-  let match = /[Ss](\d{1,2})[Ee](\d{1,4})/.exec(base)
-  if (match) return Number(match[2])
-  match = /(?:第|\[)(\d{1,4})(?:集|话|話|\])/.exec(base)
-  if (match) return Number(match[1])
-  match = /(?:^|[^\d])(\d{1,3})(?:v\d)?(?:[^\d]|$)/.exec(base)
-  if (match) return Number(match[1])
-  return null
-}
+export const videoIndexOf = (name: string): number | null => parseEpisodeNumber(name)
 
 /** 递归收集到的视频文件；mediaPath 相对媒体库目录。 */
 export interface VideoFile {
@@ -64,13 +58,15 @@ export interface MediaSyncServiceDependencies {
   models: CatalogModels
   settings: AppConfig
   localMediaService: LocalMediaWriter
+  /** 可选：扫描时抽取视频中间帧生成封面。 */
+  videoCover?: VideoCoverGenerator
 }
 
 /**
  * 媒体库目录与视频记录的落库：目录 → local_media，视频文件 → local_media_video。
  * Agent 与扫描任务共用这一份，保证两条路径的判定完全一致。
  */
-export function createMediaSyncService({ models, settings, localMediaService }: MediaSyncServiceDependencies): MediaSyncService {
+export function createMediaSyncService({ models, settings, localMediaService, videoCover }: MediaSyncServiceDependencies): MediaSyncService {
   const resolveFolder = (library: Library, relPath?: string): string => {
     const root = path.resolve(library.root)
     const absolute = path.resolve(root, relPath || '.')
@@ -114,24 +110,65 @@ export function createMediaSyncService({ models, settings, localMediaService }: 
     if (!stat?.isDirectory()) throw new HttpError(404, `目录不可用：${binding.folderPath}`)
 
     const found = await collectVideos(directory, { signal })
+    const media = models.media.find({ id: binding.mediaId })
+    const classification = classifyVideos(found, { episodeCount: media?.episodeCount })
     const existing = models.videos.list({ limit: 5000, offset: 0, filters: { localMediaId: binding.id } }).items
     const byPath = new Map<string, LocalMediaVideo>(existing.map((video): [string, LocalMediaVideo] => [video.mediaPath, video]))
     let created = 0, updated = 0, missing = 0, order = 0
+    const metadataFor = async (file: VideoFile, previous: LocalMediaVideo | undefined): Promise<Record<string, number | null>> => {
+      const unchanged = previous && previous.mtimeMs === file.mtimeMs && previous.sizeBytes === file.sizeBytes
+      const complete = previous && previous.durationMs && previous.width != null && previous.height != null && previous.frameCount != null
+      if (unchanged && complete) return {}
+      const info = await probe(path.join(directory, file.mediaPath), { timeoutMs: 15_000 }).catch(() => null)
+      if (!info) return {}
+      const width = info.video?.width || null
+      const height = info.video?.height || null
+      const frameCount = info.video?.frames || null
+      const durationMs = info.duration > 0 ? Math.round(info.duration * 1000) : null
+      const metadata: Record<string, number | null> = {}
+      if (durationMs !== null && durationMs !== previous?.durationMs) metadata.durationMs = durationMs
+      if (width !== previous?.width) metadata.width = width
+      if (height !== previous?.height) metadata.height = height
+      if (frameCount !== previous?.frameCount) metadata.frameCount = frameCount
+      return metadata
+    }
+    const coverFor = async (file: VideoFile, previous: LocalMediaVideo | undefined): Promise<string | null> => {
+      if (!videoCover) return previous?.coverPath ?? null
+      const changed = !previous || previous.mtimeMs !== file.mtimeMs || previous.sizeBytes !== file.sizeBytes
+      if (previous?.coverPath && !changed) return previous.coverPath
+      if (signal?.aborted) return previous?.coverPath ?? null
+      try {
+        const cover = await videoCover.ensure(path.join(directory, file.mediaPath), binding.id, file.mediaPath, {
+          force: Boolean(previous?.coverPath) && changed,
+        })
+        return cover ?? previous?.coverPath ?? null
+      } catch {
+        return previous?.coverPath ?? null
+      }
+    }
 
     for (const file of found) {
       order += 1
       const previous = byPath.get(file.mediaPath)
+      const type = classification.get(file.mediaPath) ?? { videoType: 'main' as const, videoIndex: videoIndexOf(file.title) ?? order }
+      const metadata = await metadataFor(file, previous)
+      const coverPath = await coverFor(file, previous)
       if (!previous) {
         models.videos.create({
           localMediaId: binding.id, mediaId: binding.mediaId, mediaPath: file.mediaPath, title: file.title,
-          videoIndex: videoIndexOf(file.title) ?? order, sizeBytes: file.sizeBytes, mtimeMs: file.mtimeMs,
+          videoType: type.videoType, videoIndex: type.videoIndex,
+          sizeBytes: file.sizeBytes, mtimeMs: file.mtimeMs, ...metadata,
+          ...(coverPath ? { coverPath } : {}),
         })
         created += 1
         continue
       }
-      const patch: Record<string, unknown> = {}
+      const patch: Record<string, unknown> = { ...metadata }
+      if (previous.videoType !== type.videoType) patch.videoType = type.videoType
+      if (previous.videoIndex !== type.videoIndex) patch.videoIndex = type.videoIndex
       if (previous.sizeBytes !== file.sizeBytes) patch.sizeBytes = file.sizeBytes
       if (previous.mtimeMs !== file.mtimeMs) patch.mtimeMs = file.mtimeMs
+      if (coverPath && coverPath !== previous.coverPath) patch.coverPath = coverPath
       if (previous.missing) patch.missing = false
       if (Object.keys(patch).length) { models.videos.update({ id: previous.id }, patch); updated += 1 }
       byPath.delete(file.mediaPath)

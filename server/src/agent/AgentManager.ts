@@ -1,6 +1,6 @@
 import { runPiAgentWithTools } from './pi.runtime.ts'
 import type { BaseAgent } from './base.agent.ts'
-import type { AgentRunOptions, AgentRunResult } from './types.ts'
+import type { AgentRunOptions, AgentRunResult, AgentStreamEvent } from './types.ts'
 import type { AiConfig, Logger } from '../types.ts'
 
 export interface AgentManagerOptions {
@@ -46,14 +46,21 @@ export class AgentManager {
     return agent as BaseAgent<T>
   }
 
-  async run<T>(type: string, context: T, { signal }: { signal?: AbortSignal } = {}): Promise<AgentRunResult> {
+  async run<T>(
+    type: string,
+    context: T,
+    { signal, onEvent }: { signal?: AbortSignal; onEvent?: (event: AgentStreamEvent) => void } = {},
+  ): Promise<AgentRunResult> {
     const agent = this.get<T>(type)
     const config = this.#resolveConfig()
+    const history = agent.history(context)
     this.#logger?.info?.({ agent: type }, 'Agent 开始处理')
     const result = await this.#runner(config, {
       prompt: agent.userPrompt(context),
       systemPrompt: agent.systemPrompt(context),
       tools: agent.tools(context),
+      ...(history.length ? { history } : {}),
+      ...(onEvent ? { onEvent } : {}),
       signal,
       maxTurns: agent.maxTurns,
       maxToolCalls: agent.maxToolCalls,

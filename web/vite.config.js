@@ -14,10 +14,19 @@ export default defineConfig(({ mode }) => {
       changeOrigin: false,
       proxyTimeout: 300_000,
       timeout: 300_000,
+      // 媒体助手 /api/agent/chat 使用同源 WebSocket，开发环境需要代理 Upgrade。
+      ws: true,
     },
     // Bangumi covers are served by the backend outside /api. Keep this narrower
     // than /assets so the built app's own /assets/index-*.js files are untouched.
     '/assets/bangumi': {
+      target,
+      changeOrigin: false,
+      proxyTimeout: 300_000,
+      timeout: 300_000,
+    },
+    // 扫描生成的视频中间帧封面，同样由后端从 DATA_DIR 提供。
+    '/assets/local-media': {
       target,
       changeOrigin: false,
       proxyTimeout: 300_000,

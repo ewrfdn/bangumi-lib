@@ -71,6 +71,18 @@ walk(dir):
 - 磁盘不可用 → 根目录 `stat` 失败，整个任务失败，不写任何 mtime。
 - `missing` 只用于保留记录与历史：默认列表不展示该目录及其整棵子树，传 `includeMissing` 才返回。
 
+### 4.2 逐层归类边界
+
+扫描是逐层的，但**只有本层直接出现视频文件（`VIDEO_EXTS`）的目录才会交给 Agent**，
+绑定键就是该目录的完整相对路径：`folder_hash = sha256(libraryId + '\0' + 小写相对路径)`。
+
+- 本层没有视频文件（只有子目录/字幕/图片）＝容器：直接标记 `scanned`，不调用模型、不建绑定；
+- 子目录里出现视频时，对子目录单独归类并绑定子目录路径；
+- 本层有视频、但只是样片而正片在子目录：Agent 可判 `container`，仍不绑定当前层。
+- 扫描到某个目录时，会向上检查 `a`、`a/b` 等祖先路径是否已有绑定；命中则把绑定信息（作品标题、
+  季度、集数、dataSource 等）作为 `ancestors` 传给 Agent——祖先绑定会递归同步视频，子目录通常是
+  番外/特典/资源，Agent 不应重复绑定。
+
 ## 4.1 变更检测的三个边界
 
 | 变更 | 能否被 mtime 发现 |
@@ -83,19 +95,21 @@ walk(dir):
 
 ## 5. 分类与入库
 
-Agent 对每个变化目录判断三种结论：
+扫描器只为「本层直接有视频文件」的目录调用 Agent，Agent 对每个这样的目录判断：
 
 | 结论 | 动作 |
 | --- | --- |
-| 作品目录 | 建/复用 `media`，建 `local_media`，递归收集视频写 `local_media_video` |
-| 容器目录 | 不建记录，交给子目录各自处理 |
-| 忽略 | 不建记录 |
+| 作品目录 | 建/复用 `media`，以**当前目录**为路径建 `local_media`，递归收集视频写 `local_media_video` |
+| 容器目录 | 不建记录，交给子目录各自处理（仅当本层视频只是样片/预告时出现） |
+| 忽略 | 不建记录（特典、字幕组目录、纯字幕/图片目录等） |
+
+纯容器目录（本层没有任何视频文件）不会调用 Agent，直接标记 `scanned`，由子目录出现视频时单独归类。
 
 只有视频文件入库（`VIDEO_EXTS`）。字幕、封面、nfo、种子只作为判断线索。
 
 匹配不到 Bangumi 时：用文件夹名建 `media`，`data_source` 留空，`attribute.scan = { origin: 'folder_name', needsReview: true }`，与抓到资料记录明确区分。
 
-已存在绑定且 `media.data_source` 有值的目录：**不调 Agent**，由服务端直接做视频 diff（新增写库、消失标 `missing=1`）。
+已存在绑定且 `media.data_source` 有值的目录：**不调 Agent**，由服务端直接做视频 diff（新增写库、消失标 `missing=1`）。子目录若已被祖先目录的绑定覆盖，也不再单独归类。
 
 ## 6. Bangumi 资源
 
@@ -118,22 +132,50 @@ data/bangumi/<subjectId>/
 | `crawl_bangumi` | 写 | 抓取并存图、建/更新 media，幂等 |
 | `create_media_from_folder` | 写 | 未匹配时按文件夹名建 media 并标记待确认 |
 | `update_media` | 写 | 编辑白名单字段 |
-| `sync_local_media` | 写 | 建 local_media 并由服务端递归收集视频；消失标 missing |
+| `sync_local_media` | 写 | 建 local_media 并由服务端递归收集视频；按 Bangumi 总集数自动分正片/番外；消失标 missing |
+| `inspect_video` | 写 | ffprobe 读取时长/分辨率/帧数并归档到 local_media_video |
+| `screenshot_video` | 写 | 截取视频中间帧并写入该视频记录 |
+| `update_videos` | 写 | 批量修正视频 `video_type` / `video_index` |
 | `report` | 写 | 本轮结论 |
 
 **没有删除类工具。** 所有路径参数经库根校验，不能越界。
 
 写工具标记为 `executionMode: 'sequential'`，其余走默认并行。单轮运行的上限：
 
-| 限制 | 值 | 行为 |
-| --- | --- | --- |
-| 工具调用总次数 | 32 | 超出抛错并结束本轮 |
-| 对话轮数 | 10 | `finishTurn` 返回 `end` |
-| 总耗时 | 120s | 中止流并抛 `PI_TIMEOUT` |
+| 限制 | 对话 Agent 默认 | 番剧整理 Agent | 行为 |
+| --- | --- | --- | --- |
+| 工具调用总次数 | 24 | 50 | 超出抛错并结束本轮 |
+| 对话轮数 | 8 | 20 | `finishTurn` 返回 `end` |
+| 总耗时 | 120s | 300s | 中止流并抛 `PI_TIMEOUT` |
 
-模型只负责判断和选择；视频清单、路径解析、幂等写入都由服务端完成。目录已在 `local_media` 且影视有 `data_source` 时，扫描直接同步视频，不进入模型。AI 未启用时新目录记为 `failed`，下次扫描重试，不会被误标为已处理。
+番剧整理需要「搜索 → 抓取 → 绑定 → 抽查」多步，8 轮时容易在收尾前被截断；多季/多字幕组等
+复杂目录更久，因此在 `BangumiAgent` 里把工具调用放宽到 50、轮数放宽到 20、超时放宽到 300s。
+
+模型只负责判断和选择；视频清单、路径解析、幂等写入都由服务端完成。目录已在 `local_media` 且影视有 `data_source` 时，扫描直接同步视频，不进入模型。子目录如果已被**祖先目录**的绑定覆盖，也不再单独交给 Agent（祖先绑定会递归同步视频，重复绑定会让同一作品出现多条 `local_media` 和重复视频）。AI 未启用时新目录记为 `failed`，下次扫描重试，不会被误标为已处理。
+
+`sync_local_media` 会依据媒体的 `episode_count` 自动区分正片和番外：1..总集数的整数集号、且不带 `特典/SP/PV/CM/NCOP` 等标记的是正片；其余为番外。Agent 发现自动分类不符合实际时，用 `update_videos` 批量修正；`inspect_video` / `screenshot_video` 可读取归档片源信息或补封面。
 
 `sync_local_media` 换绑影视时，`local_media` 与 `local_media_video` 的复合外键在同一事务内一起迁移（`defer_foreign_keys`）。
+
+### 7.1 搜索兜底与重试
+
+- `search_bangumi` 会先用原始关键词搜索；0 条时自动重试最多 3 个归一后的变体（全角波浪号、
+  去字幕组/编码标记、主标题），返回 `triedKeywords` 说明实际搜索词。
+- 后台启用 DeepSeek 联网搜索且配置了可用密钥时，整理 Agent 会额外获得 `web_search` / `web_fetch`：
+  Bangumi 用尽变体仍搜不到时，按提示词先联网确认作品名/别名再重试；网页结果不能当 Bangumi ID。
+- 仍找不到时必须 `create_media_from_folder` 建 `needsReview` 记录并绑定，不允许在目录有视频时
+  直接 `report failed` / `ignored`。
+- **祖先绑定透传**：`ancestors` 非空时，Agent 先判断当前目录是不是祖先作品的番外/特典/版本；
+  是就复用祖先绑定（必要时用 `get_folder_binding` + `update_videos` 修正番外/集号）并 `report`，
+  **不得**再 `sync_local_media` 产生第二条绑定；确认是独立作品时 `report failed` 说明需要拆目录。
+- **季度区分**：Bangumi 的续作/不同季度是独立条目（如「我们真的学不来」257369 与
+  「我们真的学不来！」285130）。选条目时必须结合文件夹路径里的季标识、`airedOn` 年份，
+  抓取后用 `episodeCount` 与本地集数复核；都对不上时宁可 `report failed`，不要绑错季度。
+- **容器目录不绑定**：当前目录一级子项里没有视频文件、只有子目录时，`report` 为 `container`，
+  不新建/绑定影视；视频由子目录单独处理，避免父目录和子目录各绑一份。
+- **重试**：Agent 正常 `report` 后目录状态会写成 `scanned`，mtime 未变化时下次扫描不会重复调用模型。
+  对误判/上次未识别的目录，用 `POST /api/libraries/:id/scan` 的 `{ "force": true }`（媒体助手
+  `scan_library` 工具同样支持 `force`）强制重新分类所有目录。
 
 ## 8. 定时任务
 
@@ -172,7 +214,11 @@ tasks:
 | 目录暂时读不到 | `status=failed`，保留旧 mtime，下轮重试 |
 | 目录已删除 | `status=missing`，记录保留 |
 | Agent 抛错/超时 | 不更新 mtime，下轮重试 |
+| Agent 正常 report 但未识别出作品 | 目录记为 `scanned`，需 `force: true` 才会重新分类 |
 | Bangumi 限流 | 工具返回错误文本，Agent 决定 report 失败 |
+| Bangumi / 网络不可用 | 搜索工具报错；启用联网搜索时可用 `web_search` 确认标题，但 `crawl_bangumi` 仍需 Bangumi 可用 |
+| 目录名搜不到（波浪号、副标题、发布标记） | `search_bangumi` 自动尝试归一后的关键词变体 |
+| 进程重启时任务正在运行 | 启动时把残留的 `running`/`queued` 任务标记为 `failed`（「服务重启，任务中断」），重新触发即可 |
 
 ## 10. 实施顺序
 

@@ -104,6 +104,20 @@ test('library catalog attaches bound media and series detail exposes episode sel
     })).json().item
     const folder = await app.inject({ method: 'POST', url: '/api/local-media', payload: { libraryId: 'bangumi', folderPath: 'Series', mediaId: media.id } })
     assert.equal(folder.statusCode, 201)
+    const folderItem = folder.json().item
+    const video = await app.inject({
+      method: 'POST', url: '/api/local-media-videos',
+      payload: { localMediaId: folderItem.id, mediaPath: 'episode.mp4', videoIndex: 1, coverPath: 'local-media/1/cover.jpg' },
+    })
+    assert.equal(video.statusCode, 201)
+    const extra = await app.inject({
+      method: 'POST', url: '/api/local-media-videos',
+      payload: {
+        localMediaId: folderItem.id, mediaPath: 'Season 1/episode 2.mkv', videoIndex: 2.5, videoType: 'extra',
+        durationMs: 720000, width: 1920, height: 1080, frameCount: 17280,
+      },
+    })
+    assert.equal(extra.statusCode, 201)
 
     const catalog = (await app.inject('/api/library?library=bangumi')).json()
     const bound = catalog.series.find((series) => series.path === '/Series')
@@ -120,6 +134,16 @@ test('library catalog attaches bound media and series detail exposes episode sel
     assert.ok(detail.videos.every((video) => video.mediaId === media.id))
     assert.deepEqual(detail.videos.map((video) => video.seasonName).sort(), ['Season 1', '全部剧集'].sort())
     assert.equal(detail.videos.find((video) => video.seasonName === '全部剧集').path, '/Series/episode.mp4')
+    assert.equal(detail.videos.find((video) => video.name === 'episode.mp4').coverPath, 'local-media/1/cover.jpg')
+    assert.equal(detail.videos.find((video) => video.name === 'episode.mp4').videoType, 'main')
+    assert.equal(detail.videos.find((video) => video.name === 'episode.mp4').videoIndex, 1)
+    const extraVideo = detail.videos.find((video) => video.name === 'episode 2.mkv')
+    assert.equal(extraVideo.videoType, 'extra')
+    assert.equal(extraVideo.videoIndex, 2.5)
+    assert.equal(extraVideo.durationMs, 720000)
+    assert.equal(extraVideo.width, 1920)
+    assert.equal(extraVideo.height, 1080)
+    assert.equal(extraVideo.frameCount, 17280)
 
     const unboundDetail = (await app.inject(`/api/library/series?${new URLSearchParams({ library: 'bangumi', path: '/Unbound' })}`)).json()
     assert.equal(unboundDetail.media.length, 0)
@@ -129,6 +153,20 @@ test('library catalog attaches bound media and series detail exposes episode sel
     assert.equal((await app.inject('/api/library/series?library=bangumi')).statusCode, 400)
     assert.equal((await app.inject(`/api/library/series?${new URLSearchParams({ library: 'bangumi', path: '/No' })}`)).statusCode, 404)
     assert.equal((await app.inject(`/api/library/series?${new URLSearchParams({ library: 'bangumi', path: '/Series', x: '1' })}`)).statusCode, 400)
+  } finally { await app.close() }
+})
+
+test('scan-generated local covers are served from DATA_DIR/local-media', async () => {
+  const directory = path.join(temporary, 'data', 'local-media', '1')
+  await fs.mkdir(directory, { recursive: true })
+  await fs.writeFile(path.join(directory, 'cover.jpg'), 'local-cover')
+  const app = await makeApp()
+  try {
+    const response = await app.inject('/assets/local-media/1/cover.jpg')
+    assert.equal(response.statusCode, 200)
+    assert.match(response.headers['content-type'], /^image\/jpeg/)
+    assert.equal(response.rawPayload.toString(), 'local-cover')
+    assert.equal((await app.inject('/assets/local-media/1/missing.jpg')).statusCode, 404)
   } finally { await app.close() }
 })
 

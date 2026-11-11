@@ -87,6 +87,8 @@ test('adding an episode only re-examines its own directory', async () => {
 })
 
 test('renaming inside a nested directory is still detected', async () => {
+  // 目录 mtime 是毫秒精度；先等一下，避免重命名和上一次扫描落在同一毫秒导致漏检。
+  await new Promise((resolve) => setTimeout(resolve, 10))
   await fs.rename(path.join(root, 'Show A', 'Season 1', '02.mkv'), path.join(root, 'Show A', 'Season 1', '02-renamed.mkv'))
   const seen = collect()
   await service.scan('bangumi', { onChanged: seen.onChanged })
@@ -137,6 +139,31 @@ test('depth limit stops the walk and invalid values are rejected', async () => {
   for (const maxDepth of [-1, 11, 1.5, '2']) {
     await assert.rejects(() => service.scan('bangumi', { maxDepth }), { status: 400 })
   }
+})
+
+test('force re-examines every directory even when unchanged', async () => {
+  const forceRoot = path.join(temporary, 'force-library')
+  await fs.mkdir(path.join(forceRoot, 'A', 'Season 1'), { recursive: true })
+  await fs.writeFile(path.join(forceRoot, 'A', 'Season 1', '01.mkv'), 'video')
+  const forceSettings = {
+    getLibrary() {
+      return { id: 'bangumi', name: '番剧库', root: forceRoot }
+    },
+  }
+  const fresh = createDatabase(':memory:')
+  try {
+    const forcedService = createLibFolderService({ models: fresh, settings: forceSettings })
+    const first = await forcedService.scan('bangumi', { onChanged: collect().onChanged })
+    assert.equal(first.changed, 3)
+    const secondSeen = collect()
+    const second = await forcedService.scan('bangumi', { onChanged: secondSeen.onChanged })
+    assert.equal(second.changed, 0)
+    assert.equal(secondSeen.length, 0)
+    const forcedSeen = collect()
+    const forced = await forcedService.scan('bangumi', { onChanged: forcedSeen.onChanged, force: true })
+    assert.equal(forced.changed, 3)
+    assert.deepEqual(forcedSeen.map((payload) => payload.folder.relPath).sort(), ['', 'A', 'A/Season 1'])
+  } finally { fresh.close() }
 })
 
 test('unknown libraries are rejected before touching the filesystem', async () => {

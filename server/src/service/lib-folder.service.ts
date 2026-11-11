@@ -51,6 +51,8 @@ export interface ScanFolderChange {
 
 export interface ScanOptions {
   maxDepth?: number
+  /** 忽略 mtime/状态缓存，强制重新分类所有目录（用于重试模型误判或失败目录）。 */
+  force?: boolean
   signal?: AbortSignal
   onChanged?: (change: ScanFolderChange) => void | Promise<void>
 }
@@ -147,7 +149,7 @@ export function createLibFolderService({ models, settings }: LibFolderServiceDep
     if (!Number.isInteger(requested) || requested < 0 || requested > HARD_MAX_DEPTH) {
       throw new HttpError(400, `扫描深度必须是 0 至 ${HARD_MAX_DEPTH} 的整数`)
     }
-    const { signal, onChanged } = options
+    const { signal, onChanged, force } = options
     const startedAt = Date.now()
     const summary: ScanSummary = { libraryId: library.id, visited: 0, changed: 0, failed: 0, missing: 0, durationMs: 0 }
 
@@ -187,7 +189,7 @@ export function createLibFolderService({ models, settings }: LibFolderServiceDep
 
       const visible = entries.filter((entry) => !isIgnored(entry.name))
       node.entryCount = visible.length
-      const changed = !row || row.status !== 'scanned' || row.mtimeMs !== node.mtimeMs || row.entryCount !== visible.length
+      const changed = force === true || !row || row.status !== 'scanned' || row.mtimeMs !== node.mtimeMs || row.entryCount !== visible.length
 
       let saved: LibFolder
       if (changed && onChanged) {

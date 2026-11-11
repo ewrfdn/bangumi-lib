@@ -53,3 +53,42 @@ button:disabled { cursor: not-allowed; }
 .empty .btn { margin-top: 7px; }
 @media (max-width: 600px) { .container { width: calc(100% - 20px); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; } }
+
+/* ==========================================================================
+   手柄模式（Gamepad）：主机游戏库式选中高亮
+   由 nav.js 在 focusin 时给当前元素加 [data-gp-focused]，
+   GamepadProvider 在 <html> 上切换 .gp-mode / .gp-hide-cursor。
+   ========================================================================== */
+html.gp-mode [data-gp-focused] {
+  outline: 2px solid #c4b5fd;
+  outline-offset: 3px;
+  border-radius: 6px;
+  box-shadow: 0 0 0 3px #a78bfa2e, 0 0 26px #a78bfa33;
+  transition: outline-color .12s ease, box-shadow .12s ease;
+}
+
+/* 卡片类：轻微放大 + 提升层级，内部封面再叠一层描边光晕 */
+html.gp-mode [data-gp-card][data-gp-focused] {
+  position: relative;
+  z-index: 5;
+  transform: translateY(-2px) scale(1.035);
+  transition: transform .16s ease;
+}
+html.gp-mode [data-gp-card][data-gp-focused] :is(.poster-wrap, .series-cover, .continue-cover, .folder-poster, .thumb) {
+  outline: 2px solid #d6c6ff;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px #a78bfa33, 0 14px 38px #00000080, 0 0 34px #a78bfa45;
+}
+
+/* 非卡片按钮 / 链接 / 表单控件：选中时给一层很淡的主色底，避免覆盖既有 .btn / 卡片样式 */
+html.gp-mode :is(a, button, input, select, summary):not(.btn):not([data-gp-card]):not(:disabled)[data-gp-focused] {
+  background-color: #a78bfa12;
+}
+
+/* 最近输入来自手柄时隐藏鼠标指针 */
+html.gp-mode.gp-hide-cursor, html.gp-mode.gp-hide-cursor * { cursor: none !important; }
+
+/* 减少动态效果：不放大，只保留描边高亮 */
+@media (prefers-reduced-motion: reduce) {
+  html.gp-mode [data-gp-card][data-gp-focused] { transform: none; }
+}

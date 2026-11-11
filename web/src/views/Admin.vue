@@ -72,7 +72,10 @@ async function load() {
   loading.value = true
   denied.value = false
   loadError.value = ''
-  try { applyConfig((await api.aiConfig()).config) }
+  try {
+    applyConfig((await api.aiConfig()).config)
+    await loadSearch()
+  }
   catch (e) {
     if (e.status === 403 && e.data?.code === 'ADMIN_AUTH_REQUIRED') denied.value = true
     else loadError.value = e.message
@@ -130,6 +133,133 @@ function markKeyRemoval() {
   clearApiKey.value = !clearApiKey.value
   if (clearApiKey.value) apiKey.value = ''
   success.value = ''
+}
+
+/* ---------- 联网搜索（DeepSeek） ---------- */
+const SEARCH_DEFAULT_BASE_URL = 'https://api.deepseek.com'
+const searchSaved = ref(null)
+const searchKey = ref('')
+const clearSearchKey = ref(false)
+const searchTestResult = ref(null)
+const searchError = ref('')
+const searchSuccess = ref('')
+const searchForm = reactive({
+  enabled: false,
+  baseUrl: SEARCH_DEFAULT_BASE_URL,
+  count: 8,
+  timeoutSeconds: 15,
+  needContent: true,
+  reuseModelKey: false,
+})
+const searchKeySourceLabel = computed(() => {
+  if (searchForm.reuseModelKey) return '复用模型服务密钥'
+  if (!searchSaved.value?.hasApiKey) return '未配置密钥'
+  return searchSaved.value.apiKeySource === 'environment' ? '密钥来自环境变量' : '已保存密钥'
+})
+const searchHasChanges = computed(() => Boolean(searchSaved.value) && (
+  searchKey.value.length > 0 || clearSearchKey.value ||
+  Boolean(searchForm.enabled) !== Boolean(searchSaved.value.enabled) ||
+  searchForm.baseUrl !== (searchSaved.value.baseUrl || SEARCH_DEFAULT_BASE_URL) ||
+  Number(searchForm.count) !== Number(searchSaved.value.count ?? 8) ||
+  Math.round(Number(searchForm.timeoutSeconds) * 1000) !== Number(searchSaved.value.timeoutMs ?? 15000) ||
+  Boolean(searchForm.needContent) !== (searchSaved.value.needContent !== false) ||
+  Boolean(searchForm.reuseModelKey) !== Boolean(searchSaved.value.reuseModelKey)
+))
+const searchSample = computed(() => searchTestResult.value?.sample?.[0] || null)
+watch(() => [searchForm.enabled, searchForm.baseUrl, searchForm.count, searchForm.timeoutSeconds, searchForm.needContent, searchForm.reuseModelKey, searchKey.value, clearSearchKey.value], () => {
+  searchTestResult.value = null
+  searchSuccess.value = ''
+}, { flush: 'sync' })
+function applySearchConfig(config) {
+  searchSaved.value = config
+  Object.assign(searchForm, {
+    enabled: Boolean(config.enabled),
+    baseUrl: config.baseUrl || SEARCH_DEFAULT_BASE_URL,
+    count: config.count ?? 8,
+    timeoutSeconds: (config.timeoutMs ?? 15000) / 1000,
+    needContent: config.needContent !== false,
+    reuseModelKey: Boolean(config.reuseModelKey),
+  })
+  searchKey.value = ''
+  clearSearchKey.value = false
+}
+async function loadSearch() {
+  searchError.value = ''
+  try { applySearchConfig((await api.searchConfig()).config) }
+  catch (e) {
+    if (e.status === 403 && e.data?.code === 'ADMIN_AUTH_REQUIRED') denied.value = true
+    else searchError.value = e.message
+  }
+}
+function searchKeyAvailable() {
+  const storedKey = Boolean(searchSaved.value?.hasApiKey) && !clearSearchKey.value
+  if (searchForm.reuseModelKey) return Boolean(saved.value?.hasApiKey) || storedKey
+  return storedKey || Boolean(searchKey.value.trim())
+}
+const searchKeyMissing = computed(() => searchForm.enabled && !searchKeyAvailable())
+function searchDraft({ requireConfigured = false, requireKey = false } = {}) {
+  const baseUrl = searchForm.baseUrl.trim()
+  if (baseUrl) {
+    let parsed
+    try { parsed = new URL(baseUrl) } catch { throw new Error('请输入有效的搜索 Base URL。') }
+    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('搜索 Base URL 需要使用 http 或 https。')
+  } else if (searchForm.enabled || requireConfigured) throw new Error('请填写搜索 Base URL。')
+  const count = Number(searchForm.count)
+  if (!Number.isSafeInteger(count) || count < 1 || count > 50) throw new Error('返回条数需要是 1 至 50 的整数。')
+  const timeoutMs = Math.round(Number(searchForm.timeoutSeconds) * 1000)
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120000) throw new Error('搜索超时时间需要在 1 至 120 秒之间。')
+  if (requireKey && !searchKeyAvailable()) {
+    throw new Error(searchForm.reuseModelKey
+      ? '「复用模型服务密钥」需要先在「模型连接」中保存 API Key。'
+      : '请填写搜索 API Key，或勾选「复用模型服务密钥」。')
+  }
+  return {
+    enabled: Boolean(searchForm.enabled),
+    baseUrl,
+    count,
+    timeoutMs,
+    needContent: Boolean(searchForm.needContent),
+    reuseModelKey: Boolean(searchForm.reuseModelKey),
+    ...(!searchForm.reuseModelKey && searchKey.value.trim() ? { apiKey: searchKey.value.trim() } : {}),
+    ...(clearSearchKey.value ? { clearApiKey: true } : {}),
+  }
+}
+async function saveSearch() {
+  if (busy.value) return
+  searchError.value = ''
+  searchSuccess.value = ''
+  try {
+    const config = searchDraft()
+    busy.value = 'search-save'
+    const response = await api.saveSearchConfig(config)
+    applySearchConfig(response.config || (await api.searchConfig()).config)
+    searchSuccess.value = '搜索配置已保存。'
+  } catch (e) { searchError.value = e.message }
+  finally { busy.value = '' }
+}
+async function testSearch() {
+  if (busy.value) return
+  searchError.value = ''
+  searchSuccess.value = ''
+  searchTestResult.value = null
+  try {
+    const config = searchDraft({ requireConfigured: true, requireKey: true })
+    busy.value = 'search-test'
+    const response = await api.testSearchConfig(config)
+    if (!response.ok) throw new Error(response.error || '搜索测试未通过。')
+    searchTestResult.value = response
+  } catch (e) { searchError.value = e.message }
+  finally { busy.value = '' }
+}
+function markSearchKeyRemoval() {
+  clearSearchKey.value = !clearSearchKey.value
+  if (clearSearchKey.value) searchKey.value = ''
+  searchSuccess.value = ''
+}
+function onReuseModelKeyChange() {
+  if (!searchForm.reuseModelKey) return
+  searchKey.value = ''
+  clearSearchKey.value = false
 }
 
 /* ---------- 媒体库 ---------- */
@@ -586,7 +716,7 @@ onBeforeUnmount(() => {
   <div class="admin-page container">
     <div class="admin-heading"><div><h1>后台管理</h1><p>媒体库、任务记录、定时任务与模型服务</p></div></div>
     <div class="admin-tabs" role="tablist" aria-label="后台管理分区">
-      <button v-for="item in tabs" :key="item.id" type="button" role="tab" :aria-selected="tab === item.id" :class="{ active: tab === item.id }" @click="tab = item.id">{{ item.label }}</button>
+      <button v-for="item in tabs" :key="item.id" type="button" role="tab" :aria-selected="tab === item.id" :data-gp-autofocus="tab === item.id ? '' : undefined" :class="{ active: tab === item.id }" @click="tab = item.id">{{ item.label }}</button>
     </div>
 
     <section v-if="tab === 'ai'" class="admin-panel" role="tabpanel" aria-label="模型服务">
@@ -614,6 +744,23 @@ onBeforeUnmount(() => {
             <div v-if="success" class="save-success" role="status"><Icon name="check" :size="16" />{{ success }}</div>
             <div class="form-actions"><span class="dirty-label">{{ hasChanges ? '有未保存的更改' : '当前配置已同步' }}</span><button type="button" class="btn test-button" :disabled="Boolean(busy)" @click="testConnection"><span v-if="busy === 'test'" class="spinner" /><Icon v-else name="refresh" :size="15" />{{ busy === 'test' ? '正在测试…' : '测试连接' }}</button><button type="submit" class="btn primary save-button" :disabled="Boolean(busy)"><span v-if="busy === 'save'" class="spinner" /><Icon v-else name="check" :size="15" />{{ busy === 'save' ? '正在保存…' : '保存配置' }}</button></div>
           </fieldset>
+          <section class="settings-card search-card" data-gp-card>
+            <div class="card-heading"><div><h2>联网搜索（DeepSeek）</h2><p>给媒体助手增加联网搜索与网页抓取工具（DeepSeek Search / Fetch API）。开启后助手可使用 web_search / web_fetch。</p></div><label class="toggle-label"><span>{{ searchForm.enabled ? '启用' : '关闭' }}</span><input v-model="searchForm.enabled" type="checkbox" role="switch" aria-label="启用联网搜索" data-gp-autofocus /><span class="toggle-track" aria-hidden="true" /></label></div>
+            <div class="form-content">
+              <div class="field key-field"><div class="field-heading"><label for="search-api-key">API Key</label><span class="key-status"><Icon name="shield" :size="12" />{{ searchKeySourceLabel }}</span></div><input id="search-api-key" v-model="searchKey" type="password" :disabled="searchForm.reuseModelKey" :placeholder="searchForm.reuseModelKey ? '已复用模型服务密钥' : searchSaved?.hasApiKey ? '留空保持当前密钥' : '输入 DeepSeek API Key'" autocomplete="new-password" spellcheck="false" @input="clearSearchKey = false" @keydown.enter.prevent /><div class="key-help"><small>密钥仅提交给服务端，读取配置时不会返回。</small><button v-if="searchSaved?.hasApiKey && !searchForm.reuseModelKey" type="button" class="remove-key" :class="{ marked: clearSearchKey }" @click="markSearchKeyRemoval">{{ clearSearchKey ? '撤销移除' : '移除当前密钥' }}</button></div><div v-if="clearSearchKey" class="key-removal" role="status"><Icon name="close" :size="14" /><span>保存后将移除搜索服务密钥。<template v-if="searchSaved?.apiKeySource === 'environment'">环境变量本身不会被修改。</template></span></div></div>
+              <label class="check-row"><input v-model="searchForm.reuseModelKey" type="checkbox" @change="onReuseModelKeyChange" /><span><strong>复用模型服务密钥</strong><small>主模型也使用 DeepSeek 时勾选，可复用上方模型密钥，无需重复填写。</small></span></label>
+              <div class="field"><label for="search-base-url">Base URL</label><input id="search-base-url" v-model="searchForm.baseUrl" type="text" inputmode="url" placeholder="https://api.deepseek.com" autocomplete="off" spellcheck="false" :aria-required="searchForm.enabled" @keydown.enter.prevent /><small>填写 API 根地址，无需附加 /v1/tools/search。</small></div>
+              <div v-if="searchKeyMissing" class="search-key-hint" role="status"><Icon name="shield" :size="14" /><span>启用后需要填写 API Key（或勾选「复用模型服务密钥」），否则助手无法调用联网搜索工具。</span></div>
+            </div>
+            <details class="advanced-card search-advanced"><summary><span><Icon name="settings" :size="16" />高级设置</span><Icon name="chevron-right" :size="15" /></summary><div class="advanced-content"><div class="field"><label for="search-count">返回条数</label><input id="search-count" v-model.number="searchForm.count" type="number" @keydown.enter.prevent /><small>单次搜索返回的结果数量（1-50）。</small></div><div class="field"><label for="search-timeout">请求超时（秒）</label><input id="search-timeout" v-model.number="searchForm.timeoutSeconds" type="number" @keydown.enter.prevent /><small>搜索测试与请求的等待上限（1-120 秒）。</small></div><label class="check-row"><input v-model="searchForm.needContent" type="checkbox" /><span><strong>返回网页正文 content</strong><small>开启后 web_search 会携带正文，消耗更多上下文；按需开启。</small></span></label></div></details>
+            <div v-if="searchError" class="notice err search-notice" role="alert"><span>{{ searchError }}</span><button v-if="!searchSaved" type="button" class="btn small" @click="loadSearch">重试</button></div>
+            <div v-if="searchSuccess" class="save-success search-notice" role="status"><Icon name="check" :size="16" />{{ searchSuccess }}</div>
+            <div v-if="searchTestResult" class="search-test-result" role="status">
+              <div class="test-title search-test-title"><Icon name="check" :size="16" /><h3>搜索测试成功</h3></div>
+              <dl><dt>查询</dt><dd>{{ searchTestResult.query || '—' }}</dd><dt>耗时</dt><dd>{{ Math.round(searchTestResult.latencyMs) }} ms</dd><dt>结果</dt><dd>{{ searchTestResult.count ?? '—' }} 条</dd><template v-if="searchSample"><dt>示例</dt><dd><a :href="searchSample.url" target="_blank" rel="noopener noreferrer">{{ searchSample.title || searchSample.url }}<Icon name="arrow-up-right" :size="11" /></a></dd></template></dl>
+            </div>
+            <div class="form-actions search-actions"><span class="dirty-label">{{ !searchSaved ? '尚未读取到搜索配置' : searchHasChanges ? '有未保存的更改' : '搜索配置已同步' }}</span><button type="button" class="btn test-button" :disabled="Boolean(busy)" @click="testSearch"><span v-if="busy === 'search-test'" class="spinner" /><Icon v-else name="search" :size="15" />{{ busy === 'search-test' ? '正在测试…' : '测试搜索' }}</button><button type="button" class="btn primary save-button" :disabled="Boolean(busy) || !searchSaved" @click="saveSearch"><span v-if="busy === 'search-save'" class="spinner" /><Icon v-else name="check" :size="15" />{{ busy === 'search-save' ? '正在保存…' : '保存搜索配置' }}</button></div>
+          </section>
         </form>
         <aside class="settings-side">
           <section class="side-card"><h2>当前连接</h2><dl><dt>协议</dt><dd>{{ formatLabel }}</dd><dt>模型</dt><dd class="mono">{{ form.model || '未设置' }}</dd><dt>密钥</dt><dd>{{ clearApiKey ? '等待移除' : apiKey ? '等待保存新密钥' : keySourceLabel }}</dd></dl><p>测试会使用当前填写的配置，包括尚未保存的密钥。</p></section>
@@ -813,7 +960,7 @@ onBeforeUnmount(() => {
 .admin-loading { display: flex; align-items: center; gap: 12px; min-height: 220px; justify-content: center; color: var(--text-faint); font-size: 13px; }
 .notice.ok { color: #c5b0f5; background: #a78bfa08; border: 1px solid #a78bfa20; }
 .spinner.tiny { width: 12px; height: 12px; border-width: 1.5px; }
-.table-wrap { border: 1px solid var(--line-strong); border-radius: 10px; background: #101016; overflow: auto; }.data-table { width: 100%; min-width: 920px; border-collapse: collapse; font-size: 12px; }.data-table th { position: sticky; top: 0; z-index: 1; padding: 11px 13px; text-align: left; background: #14141c; border-bottom: 1px solid var(--line-strong); color: var(--text-faint); font-size: 10px; font-weight: 500; letter-spacing: .04em; white-space: nowrap; }.data-table td { padding: 11px 13px; border-bottom: 1px solid var(--line); color: var(--text-dim); vertical-align: middle; }.data-table tbody:last-of-type > tr:last-child > td { border-bottom: none; }.data-table tbody > tr:not(.detail-row):hover > td { background: #ffffff03; }.data-table .nowrap { white-space: nowrap; }.data-table .id-cell { color: var(--text-faint); font-size: 11px; }.data-table .actions-col { text-align: right; }.data-table small { display: block; margin-top: 3px; color: var(--text-faint); font-size: 9px; font-family: ui-monospace, Consolas, monospace; }.type-label { color: var(--text); }
+.table-wrap { border: 1px solid var(--line-strong); border-radius: 10px; background: #101016; overflow: auto; }.data-table { width: 100%; min-width: 920px; border-collapse: collapse; font-size: 12px; }.data-table th { position: sticky; top: 0; z-index: 1; padding: 11px 13px; text-align: left; background: #14141c; border-bottom: 1px solid var(--line-strong); color: var(--text-faint); font-size: 10px; font-weight: 500; letter-spacing: .04em; white-space: nowrap; }.data-table td { padding: 11px 13px; border-bottom: 1px solid var(--line); color: var(--text-dim); vertical-align: middle; }.data-table tbody:last-of-type > tr:last-child > td { border-bottom: none; }.data-table tbody > tr:not(.detail-row):is(:hover, :focus-within) > td { background: #ffffff03; }.data-table tbody > tr:not(.detail-row):focus-within > td { background: #a78bfa0a; }.data-table .nowrap { white-space: nowrap; }.data-table .id-cell { color: var(--text-faint); font-size: 11px; }.data-table .actions-col { text-align: right; }.data-table small { display: block; margin-top: 3px; color: var(--text-faint); font-size: 9px; font-family: ui-monospace, Consolas, monospace; }.type-label { color: var(--text); }
 .chip.plan { color: #c5b0f5; background: #a78bfa0c; border-color: #a78bfa25; }.chip.paused { color: var(--text-faint); }.task-state { gap: 6px; }.task-state.state-running { color: #cdbbff; border-color: #a78bfa40; background: #a78bfa10; }.task-state.state-running::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: status-pulse 1.4s ease-in-out infinite; }.task-state.state-queued { color: #e3c49c; border-color: #d9b47c30; background: #d9b47c0a; }.task-state.state-succeeded { color: #c5b0f5; border-color: #a78bfa30; background: #a78bfa0c; }.task-state.state-failed { color: #efb0b9; border-color: #e594a130; background: #e594a10a; }.task-state.state-cancelled { color: var(--text-faint); }
 .progress-cell { display: flex; align-items: center; gap: 8px; min-width: 112px; }.progress-bar { position: relative; flex: 1; height: 4px; border-radius: 4px; background: #ffffff10; overflow: hidden; }.progress-bar i { position: absolute; inset: 0 auto 0 0; border-radius: 4px; background: var(--accent); transition: width .3s; }.progress-cell em { font-style: normal; font-size: 10px; color: var(--text-faint); min-width: 30px; text-align: right; }
 .summary-cell { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.row-actions { text-align: right; white-space: nowrap; }.row-actions .btn { margin-left: 5px; }.row-actions .btn:first-child { margin-left: 0; }.btn.danger { color: #efb0b9; border-color: #e594a140; background: #e594a110; }.running-label { color: var(--text-faint); font-size: 11px; }
@@ -832,7 +979,37 @@ onBeforeUnmount(() => {
 .form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding-top: 3px; }.dirty-label { color: var(--text-faint); font-size: 11px; margin-right: auto; }.form-actions .btn { min-height: 36px; padding: 0 15px; }.form-actions .spinner { width: 14px; height: 14px; border-width: 1.5px; }.save-button .spinner { border-top-color: #fff; }.save-success { display: flex; align-items: center; gap: 8px; color: #c5b0f5; font-size: 12px; padding: 10px 12px; background: #a78bfa08; border: 1px solid #a78bfa20; border-radius: 6px; margin-bottom: 15px; }.notice.err { margin-bottom: 15px; }
 .side-card { padding: 21px; margin-bottom: 18px; }.side-card h2 { font-size: 13px; font-weight: 500; margin: 0 0 18px; }.side-card dl { display: grid; grid-template-columns: 38px minmax(0,1fr); gap: 13px 13px; font-size: 11px; line-height: 1.7; margin: 0; }.side-card dt { color: var(--text-faint); }.side-card dd { margin: 0; color: #bfb9cc; overflow-wrap: anywhere; }.side-card > p { color: var(--text-faint); font-size: 11px; line-height: 1.9; margin: 20px 0 0; padding-top: 17px; border-top: 1px solid var(--line); }.test-result { border-color: #a78bfa35; background: #a78bfa07; }.test-title { display: flex; align-items: center; gap: 7px; color: #c7b1fa; margin-bottom: 18px; }.test-title h2 { margin: 0; }.side-card .model-reply { color: var(--text-dim); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow-y: auto; }
 @media(max-width:950px) { .settings-layout { grid-template-columns: minmax(0,1fr) 260px; gap: 17px; }.side-card { padding: 17px; } }
-@media(max-width:900px) { .data-table th.actions-col, .data-table td.row-actions { position: sticky; right: 0; z-index: 2; background: #121219; box-shadow: -12px 0 16px -12px #000000; }.data-table th.actions-col { z-index: 3; background: #14141c; }.data-table tbody > tr:not(.detail-row):hover > td.row-actions { background: #17171f; } }
+@media(max-width:900px) { .data-table th.actions-col, .data-table td.row-actions { position: sticky; right: 0; z-index: 2; background: #121219; box-shadow: -12px 0 16px -12px #000000; }.data-table th.actions-col { z-index: 3; background: #14141c; }.data-table tbody > tr:not(.detail-row):is(:hover, :focus-within) > td.row-actions { background: #17171f; } }
 @media(max-width:750px) { .settings-layout { grid-template-columns: 1fr; }.settings-side { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }.side-card { margin-bottom: 0; }.section-head { flex-direction: column; }.section-actions { width: 100%; justify-content: flex-end; }.detail-grid { grid-template-columns: 1fr; } }
 @media(max-width:500px) { .admin-page { padding-top: 20px; }.admin-heading { margin-bottom: 20px; }.admin-heading h1 { font-size: 21px; }.admin-tabs { width: 100%; }.admin-tabs button { flex: 1; padding: 0 8px; }.card-heading { padding: 18px; }.card-heading p { font-size: 11px; }.form-content { padding: 19px 18px; }.field + .field { margin-top: 21px; }.key-help { flex-wrap: wrap; gap: 0; }.key-help small { font-size: 10px; }.remove-key { margin-top: 7px; }.key-status { font-size: 9px; }.advanced-card summary { padding: 16px 18px; }.advanced-content { padding: 0 18px 18px; gap: 15px; }.advanced-content .field label { font-size: 11px; }.advanced-content .field small { font-size: 10px; }.form-actions { flex-wrap: wrap; }.dirty-label { flex-basis: 100%; margin-bottom: 4px; }.form-actions .btn { flex: 1; }.settings-side { grid-template-columns: 1fr; gap: 15px; }.access-notice { padding: 38px 20px; }.access-notice h2 { font-size: 16px; }.access-notice p { font-size: 12px; }.section-actions { flex-wrap: wrap; }.search-field { flex: 1; }.search-field input { width: 100%; } }
+
+/* ---------- 联网搜索（DeepSeek） ---------- */
+.search-card { margin-top: 19px; }
+.check-row { display: flex; align-items: flex-start; gap: 9px; margin-top: 23px; cursor: pointer; color: var(--text-dim); }
+.check-row > input { flex: none; width: 15px; height: 15px; margin: 2px 0 0; accent-color: var(--accent); cursor: pointer; }
+.check-row > span { min-width: 0; }
+.check-row strong { display: block; color: #d1cddc; font-size: 12px; font-weight: 500; line-height: 1.5; }
+.check-row small { display: block; margin-top: 5px; color: var(--text-faint); font-size: 11px; line-height: 1.75; }
+.check-row:hover strong { color: var(--text); }
+.check-row > input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.search-card .form-content > .check-row + .field { margin-top: 23px; }
+.advanced-content > .check-row { grid-column: 1 / -1; margin-top: 0; }
+.search-card .field input:disabled { opacity: .55; cursor: not-allowed; }
+.search-key-hint { display: flex; align-items: flex-start; gap: 7px; margin-top: 23px; padding: 9px 11px; border: 1px solid #d9b47c30; border-radius: 5px; background: #d9b47c0a; color: #e3c49c; font-size: 11px; line-height: 1.7; }
+.search-key-hint svg { flex: none; margin-top: 1px; }
+.search-advanced { border-top: 1px solid var(--line); }
+.search-card .form-actions { padding: 0 24px 22px; }
+.search-card .search-notice { margin: 0 24px 15px; }
+.search-test-result { margin: 0 24px 16px; padding: 13px 15px; border: 1px solid #a78bfa35; border-radius: 7px; background: #a78bfa07; }
+.search-test-title { margin-bottom: 11px; }
+.search-test-title h3 { margin: 0; font-size: 12px; font-weight: 500; }
+.search-test-result dl { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 7px 10px; margin: 0; font-size: 11px; line-height: 1.7; }
+.search-test-result dt { color: var(--text-faint); }
+.search-test-result dd { margin: 0; color: #bfb9cc; overflow-wrap: anywhere; }
+.search-test-result a { display: inline-flex; align-items: baseline; gap: 4px; color: #c5b2fa; }
+@media(max-width:500px) { .search-card .form-actions { padding: 0 18px 18px; }.search-card .search-notice, .search-test-result { margin-left: 18px; margin-right: 18px; } }
+
+/* 手柄选中态细节：表格行由 tr:focus-within 提亮背景；开关的 checkbox 不可见，
+   焦点落在它上面时把高亮环画到可见的 .toggle-track 上 */
+.toggle-label input[data-gp-focused] + .toggle-track { outline: 2px solid #c4b5fd; outline-offset: 4px; }
 </style>

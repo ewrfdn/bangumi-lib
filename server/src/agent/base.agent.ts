@@ -1,5 +1,5 @@
 import fs from 'node:fs'
-import type { AgentTool } from './types.ts'
+import type { AgentConversationTurn, AgentTool } from './types.ts'
 
 const PROMPT_DIR = new URL('./prompts/', import.meta.url)
 const promptCache = new Map<string, string>()
@@ -24,6 +24,11 @@ export abstract class BaseAgent<TContext = unknown> {
   abstract userPrompt(context: TContext): string
 
   abstract tools(context: TContext): AgentTool[]
+
+  /** 回放给模型的历史轮次；一次性任务不需要，对话型 Agent 覆盖它。 */
+  history(_context: TContext): AgentConversationTurn[] {
+    return []
+  }
 
   /** 读取 prompts/ 下的提示词；随代码发布，首次使用后缓存。 */
   protected promptFile(name: string): string {

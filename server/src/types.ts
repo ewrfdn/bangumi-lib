@@ -19,6 +19,19 @@ export interface AiConfig {
   timeoutMs: number
 }
 
+/** DeepSeek Search / Fetch API 的联网搜索配置（密钥单独加密存放）。 */
+export interface SearchConfig {
+  enabled: boolean
+  baseUrl: string
+  /** 单次搜索返回条数，1–50。 */
+  count: number
+  /** 是否让搜索接口返回网页 content。 */
+  needContent: boolean
+  timeoutMs: number
+  /** 复用「模型服务」里保存的 API Key（主模型同样是 DeepSeek 时）。 */
+  reuseModelKey: boolean
+}
+
 export interface CrawlerSourceConfig {
   enabled: boolean
   proxyUrl: string | null
@@ -65,6 +78,9 @@ export interface AppConfig {
   crawlers: CrawlerConfig
   aiConfigKey: string
   aiDefaults: AiConfig
+  /** 联网搜索的环境变量兜底密钥（DeepSeek API Key）。 */
+  deepseekSearchKey: string
+  searchDefaults: SearchConfig
   dbPath: string
   tasksConfigPath: string
   ffmpeg: FfmpegConfig
@@ -111,6 +127,9 @@ export interface LocalMediaVideo {
   localMediaId: number
   videoType: string
   durationMs: number | null
+  width: number | null
+  height: number | null
+  frameCount: number | null
   sizeBytes: number | null
   mtimeMs: number | null
   missing: boolean

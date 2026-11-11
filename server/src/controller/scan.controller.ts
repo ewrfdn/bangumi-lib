@@ -31,25 +31,27 @@ export function registerScanController(app: FastifyInstance, { scanService, task
     const raw = request.body ?? {}
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new HttpError(400, '请求正文必须为对象')
     const body = raw as Record<string, unknown>
-    for (const key of Object.keys(body)) if (key !== 'maxDepth') throw new HttpError(400, `不支持字段：${key}`)
+    for (const key of Object.keys(body)) if (key !== 'maxDepth' && key !== 'force') throw new HttpError(400, `不支持字段：${key}`)
     const requestedDepth = body.maxDepth ?? 4
     if (typeof requestedDepth !== 'number' || !Number.isInteger(requestedDepth) || requestedDepth < 0 || requestedDepth > 10) {
       throw new HttpError(400, 'maxDepth 必须是 0 到 10 的整数')
     }
     const maxDepth = requestedDepth
+    if (body.force !== undefined && typeof body.force !== 'boolean') throw new HttpError(400, 'force 必须是布尔值')
+    const force = body.force === true
 
     const started: TaskStartOutcome = taskRunner.start({
       key: `scan:${library.id}`,
       type: 'scan_library',
-      payload: { libraryId: library.id, maxDepth },
+      payload: { libraryId: library.id, maxDepth, ...(force ? { force: true } : {}) },
       timeoutMs: SCAN_TIMEOUT,
     }, ({ signal }: { signal: AbortSignal }) => {
       // Passed as a variable so the loosely-typed service options keep accepting `signal`.
-      const scanOptions = { maxDepth, signal }
+      const scanOptions = { maxDepth, force, signal }
       return scanService.scanLibrary(library.id, scanOptions)
     })
 
     if (started.skipped) throw new HttpError(409, '该媒体库正在扫描', 'SCAN_RUNNING')
-    return reply.code(202).send({ taskId: started.taskId, libraryId: library.id, maxDepth })
+    return reply.code(202).send({ taskId: started.taskId, libraryId: library.id, maxDepth, force })
   })
 }

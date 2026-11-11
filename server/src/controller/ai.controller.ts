@@ -2,9 +2,17 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { AgentService } from '../service/agent.service.ts'
 import type { AiSettingsService } from '../service/ai-settings.service.ts'
 import type { AuthService } from '../service/auth.service.ts'
+import type { DeepSeekSearchService } from '../service/deepseek-search.service.ts'
+import type { SearchSettingsService } from '../service/search-settings.service.ts'
 
-const localErrors: ReadonlySet<string> = new Set(['AI_CONFIG_INVALID', 'AI_NOT_CONFIGURED', 'AI_DISABLED', 'AI_CONFIG_KEY_UNAVAILABLE',
-  'AI_CONFIG_DECRYPTION_FAILED', 'AI_CONFIG_UNAVAILABLE', 'AI_PROMPT_INVALID'])
+const localErrors: ReadonlySet<string> = new Set([
+  'AI_CONFIG_INVALID', 'AI_NOT_CONFIGURED', 'AI_DISABLED', 'AI_CONFIG_KEY_UNAVAILABLE',
+  'AI_CONFIG_DECRYPTION_FAILED', 'AI_CONFIG_UNAVAILABLE', 'AI_PROMPT_INVALID',
+  'SEARCH_CONFIG_INVALID', 'SEARCH_NOT_CONFIGURED', 'SEARCH_DISABLED', 'SEARCH_CONFIG_KEY_UNAVAILABLE',
+  'SEARCH_CONFIG_DECRYPTION_FAILED', 'SEARCH_CONFIG_UNAVAILABLE', 'SEARCH_QUERY_INVALID', 'SEARCH_URL_INVALID',
+  'SEARCH_TIMEOUT', 'SEARCH_ABORTED', 'SEARCH_AUTH_FAILED', 'SEARCH_RATE_LIMITED',
+  'SEARCH_UPSTREAM_UNAVAILABLE', 'SEARCH_UPSTREAM_REJECTED', 'SEARCH_UPSTREAM_INVALID',
+])
 
 /** Service errors are plain Error objects carrying HTTP fields; read them structurally. */
 interface HttpFailure {
@@ -25,9 +33,11 @@ export interface AiControllerDependencies {
   readonly aiSettingsService: AiSettingsService
   readonly agentService: AgentService
   readonly authService: AuthService
+  readonly searchSettingsService: SearchSettingsService
+  readonly searchService: DeepSeekSearchService
 }
 
-export function registerAiController(app: FastifyInstance, { aiSettingsService, agentService, authService }: AiControllerDependencies): void {
+export function registerAiController(app: FastifyInstance, { aiSettingsService, agentService, authService, searchSettingsService, searchService }: AiControllerDependencies): void {
   const requireAdmin = async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply | undefined> => {
     reply.header('Cache-Control', 'no-store')
     if (!authService.enabled) return reply.code(403).send({ error: '请先配置 AUTH_SECRET，登录后才能使用 AI 后台和 Agent', code: 'ADMIN_AUTH_REQUIRED' })
@@ -65,6 +75,18 @@ export function registerAiController(app: FastifyInstance, { aiSettingsService, 
   app.post('/api/admin/ai/test', { preHandler: requireAdmin }, async (req: FastifyRequest, reply: FastifyReply): Promise<unknown> => {
     try {
       return await execute(req, reply, (signal: AbortSignal) => agentService.test(jsonBody(req), { signal }))
+    } catch (error) { return sendError(reply, error) }
+  })
+  // 联网搜索配置：与模型配置分离的本机密钥存储（app_settings 的另一个 type）。
+  app.get('/api/admin/ai/search', { preHandler: requireAdmin }, async (_req: FastifyRequest, reply: FastifyReply): Promise<unknown> => {
+    try { return { config: searchSettingsService.publicConfig() } } catch (error) { return sendError(reply, error) }
+  })
+  app.put('/api/admin/ai/search', { preHandler: requireAdmin }, async (req: FastifyRequest, reply: FastifyReply): Promise<unknown> => {
+    try { return { config: searchSettingsService.save(req.body) } } catch (error) { return sendError(reply, error) }
+  })
+  app.post('/api/admin/ai/search/test', { preHandler: requireAdmin }, async (req: FastifyRequest, reply: FastifyReply): Promise<unknown> => {
+    try {
+      return await execute(req, reply, (signal: AbortSignal) => searchService.test(jsonBody(req), { signal }))
     } catch (error) { return sendError(reply, error) }
   })
   app.post('/api/agent/run', { preHandler: requireAdmin }, async (req: FastifyRequest, reply: FastifyReply): Promise<unknown> => {

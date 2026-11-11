@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
-import type { AiConfig, AppConfig, CrawlerConfig, Library } from './types.ts'
+import type { AiConfig, AppConfig, CrawlerConfig, Library, SearchConfig } from './types.ts'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 export const SERVER_ROOT = path.resolve(__dirname, '..')
@@ -185,6 +185,15 @@ export const config: AppConfig = {
     maxTokens: Number(process.env.AI_MAX_TOKENS) || 2048,
     timeoutMs: Number(process.env.AI_TIMEOUT_MS) || 30000,
   } satisfies AiConfig,
+  deepseekSearchKey: process.env.DEEPSEEK_SEARCH_API_KEY || '',
+  searchDefaults: {
+    enabled: process.env.AI_SEARCH_ENABLED === '1',
+    baseUrl: process.env.AI_SEARCH_BASE_URL || 'https://api.deepseek.com',
+    count: Number(process.env.AI_SEARCH_COUNT) || 8,
+    needContent: process.env.AI_SEARCH_NEED_CONTENT !== '0',
+    timeoutMs: Number(process.env.AI_SEARCH_TIMEOUT_MS) || 15000,
+    reuseModelKey: process.env.AI_SEARCH_REUSE_MODEL_KEY === '1',
+  } satisfies SearchConfig,
   dbPath: process.env.DB_PATH === ':memory:' ? ':memory:' : path.resolve(PROJECT_ROOT, expandHome(process.env.DB_PATH || path.join(dataDir, 'anishare.sqlite'))),
   tasksConfigPath: process.env.TASKS_CONFIG
     ? path.resolve(PROJECT_ROOT, expandHome(process.env.TASKS_CONFIG))

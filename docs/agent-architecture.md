@@ -7,16 +7,24 @@
 ```
 server/src/agent/
 ├── AgentManager.ts          # 调度器：注册表 + 运行 + 日志
-├── base.agent.ts            # 基类：类型、提示词、工具、限流参数
+├── base.agent.ts            # 基类：类型、提示词、工具、历史、限流参数
 ├── agents/
-│   └── bangumi.agent.ts     # 番剧整理（目前唯一的业务 Agent）
-├── pi.runtime.ts            # Pi SDK 适配：模型、鉴权、工具循环
-├── types.ts                 # AgentTool / AgentRunResult
+│   ├── bangumi.agent.ts     # 番剧整理
+│   └── chat.agent.ts        # 媒体助手（对话型）
+├── pi.runtime.ts            # Pi SDK 适配：模型、鉴权、工具循环、历史回放、流式事件
+├── types.ts                 # AgentTool / AgentRunOptions / AgentRunResult
 ├── tools/
-│   └── media-scan.tools.ts  # 媒体库读写工具
+│   ├── media-scan.tools.ts  # 媒体扫描读写工具
+│   ├── chat.tools.ts        # 媒体助手查询与归档工具
+│   ├── search.tools.ts      # 可选：web_search / web_fetch（DeepSeek Search）
+│   └── tool-kit.ts          # 工具 schema、结果与路径解析助手
 └── prompts/
-    └── media-scan.md        # 系统提示词
+    ├── media-scan.md        # 番剧整理系统提示词
+    └── chat.md              # 媒体助手系统提示词
 ```
+
+对话型 Agent 的传输层在 `controller/agent-chat.controller.ts`（WebSocket 网关），
+入参校验与调用在 `service/chat.service.ts`；协议见 [chat-agent-api.md](chat-agent-api.md)。
 
 ## 三层职责
 
@@ -42,11 +50,13 @@ export abstract class BaseAgent<TContext = unknown> {
   abstract userPrompt(context: TContext): string
   abstract tools(context: TContext): AgentTool[]
 
+  history(context: TContext): AgentConversationTurn[]  // 可选覆盖，对话型 Agent 回放历史轮次
   protected promptFile(name: string): string  // 读取并缓存 prompts/ 下的文件
 }
 ```
 
 提示词和工具都按 **context** 构建，所以同一个 Agent 实例可以并发处理不同目录，不需要请求级状态。
+`history` 默认返回空数组，一次性任务的子类无需实现。
 
 ## AgentManager
 
@@ -59,11 +69,13 @@ const agents = new AgentManager({
 agents.register(new BangumiAgent({ services, models, mediaSync }))
 
 await agents.run('bangumi', { library, folder, entries, binding, signal })
+await agents.run('chat', { messages }, { signal, onEvent })  // 对话型：历史由 history() 提供，事件流式回传
 ```
 
 - `resolveConfig` 在每次运行前调用，配置热更新不需要重建 manager。
 - `register` 拒绝重复 `type`；`run` 对未注册类型直接抛错，不会静默跳过。
 - 运行结果 `{ text, turns, toolCalls, stopReason }` 只用于日志和摘要，**不落库**；落库全部由工具完成。
+- `onEvent` 是可选展示通道（`delta` / `tool_start` / `tool_end`），只服务 WebSocket UI，不参与业务判断。
 
 ## 番剧整理 Agent
 
@@ -88,7 +100,35 @@ await agents.run('bangumi', { library, folder, entries, binding, signal })
 
 工具清单见 [scan-scheduler-design.md](scan-scheduler-design.md#7-agent-工具)。
 
-## 新增一个 Agent
+## 媒体助手 Agent（对话型）
+
+`ChatAgent`（`type = 'chat'`，展示名「媒体助手」）是唯一的多轮对话 Agent，入口是
+`WS /api/agent/chat`，由右下角悬浮窗使用。它和一次性任务共用同一套 `AgentManager`、
+模型配置与工具约定，区别有三点：
+
+1. **上下文**：`{ messages: { role, content }[] }`，最新一条用户消息是 `userPrompt`，
+   更早的轮次由 `history(context)` 返回，运行时作为真实的 user / assistant 消息回放。
+2. **不落库**：对话只存在于浏览器 `localStorage`，每次请求由客户端带上历史；
+   服务端不写数据库、不写日志正文，连接断开即释放。
+3. **流式输出**：`AgentManager.run(type, context, { signal, onEvent })` 把
+   `text_delta`、`tool_execution_start/end` 转成 `delta` / `tool_start` / `tool_end`
+   事件，WebSocket 网关逐帧转发；`onEvent` 回调抛错被吞掉，不影响 Agent 运行。
+
+工具（`chat.tools.ts`，20 个）覆盖项目现有能力：媒体库与作品查询、目录浏览与绑定、
+本地影视搜索、观看进度、任务与定时任务查询，以及抓取 Bangumi、建/改影视、绑定目录、
+触发扫描或定时任务、取消任务等写操作；不提供删除工具。写操作由系统提示词约束为
+「仅在用户明确要求时执行」，批量扫描前先说明范围。
+
+可选能力：后台「模型服务 → 联网搜索」启用且配置了可用密钥后，`ChatAgent.tools()` 与
+`BangumiAgent.tools()` 都会追加 `web_search` / `web_fetch` 两个工具（`search.tools.ts`），
+未启用或没有密钥时不注册。番剧整理 Agent 把它用作 Bangumi 搜不到时的按需补强。
+详见 [联网搜索接入设计](deepseek-search.md)。
+
+历史回放上限：40 轮、每条 8000 字符、合计 48000 字符；`chat.service` 先做宽松归一
+（丢弃连续同角色、去掉末尾未回复的 user 轮），`pi.runtime` 再做硬校验，超出时返回
+`PI_HISTORY_INVALID` 且不会发出上游请求。
+
+## 运行时约束
 
 以电影库为例：
 

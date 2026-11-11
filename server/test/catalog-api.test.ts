@@ -45,14 +45,14 @@ test('v3 upgrades to v6 without changing legacy history, sessions or encrypted s
   old.close()
   const migrated = createDatabase(filename)
   try {
-    assert.equal(migrated.info().schemaVersion, 6)
+    assert.equal(migrated.info().schemaVersion, 7)
     assert.ok(migrated.findSession('token', 'secret', 1))
     assert.equal(migrated.getSetting('ai-config').value, 'encrypted-old-value')
   } finally { migrated.close() }
   let app = await application({ dbPath: filename })
   let media
   try {
-    assert.equal(app.database.info().schemaVersion, 6)
+    assert.equal(app.database.info().schemaVersion, 7)
     assert.equal(app.database.getProgress('/missing.mp4').time, 12)
     assert.equal(app.database.getSetting('ai-config').value, 'encrypted-old-value')
     // Avoid loading the deliberately opaque old AI value through the AI service.
@@ -65,7 +65,7 @@ test('v3 upgrades to v6 without changing legacy history, sessions or encrypted s
   } finally { await app.close() }
   const check = new Database(filename, { readonly: true })
   try {
-    assert.equal(check.pragma('user_version', { simple: true }), 6)
+    assert.equal(check.pragma('user_version', { simple: true }), 7)
     assert.equal(check.pragma('foreign_key_check').length, 0)
     assert.deepEqual(check.pragma('table_info(media_tracks)').filter(c => c.pk).sort((a, b) => a.pk - b.pk).map(c => c.name), ['media_id', 'video_index'])
   } finally { check.close() }
@@ -118,7 +118,7 @@ test('v4 adds nullable source fields without losing existing media and preserves
     assert.equal(cleared.dataSourceUrl, null)
     const created = (await request(app, 'POST', '/api/media', { title: '新影视', dataSource: 'TMDB', dataSourceUrl: 'https://www.themoviedb.org/movie/123' }, 201)).item
     assert.equal(created.dataSource, 'TMDB')
-    assert.equal(app.database.info().schemaVersion, 6)
+    assert.equal(app.database.info().schemaVersion, 7)
   } finally { await app.close() }
 })
 
