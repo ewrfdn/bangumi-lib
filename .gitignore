@@ -8,3 +8,8 @@ data/
 .DS_Store
 .env
 /tools/
+
+# 包管理：项目统一使用 npm 的 package-lock.json，忽略误生成的 yarn/pnpm 文件
+yarn.lock
+pnpm-lock.yaml
+pnpm-workspace.yaml
